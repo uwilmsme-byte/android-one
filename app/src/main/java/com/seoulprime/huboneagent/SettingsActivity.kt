@@ -27,7 +27,7 @@ class SettingsActivity : Activity() {
         }
         root.addView(TextView(this).apply { text = "HUBONE Agent 관리자 설정"; textSize = 22f })
         root.addView(TextView(this).apply {
-            text = "\${HUBONE_BASE_URL}/pt?screen_id=\${SCREEN_ID}"
+            text = "\${HUBONE_BASE_URL}/pt?screen_id=\${SCREEN_ID} · 기본 포트 8001 자동 검색 지원"
             setPadding(0, 8, 0, 12)
         })
         baseUrl = addField(root, "HUBONE_BASE_URL", config.baseUrl)
@@ -35,6 +35,7 @@ class SettingsActivity : Activity() {
 
         val buttons = LinearLayout(this).apply { gravity = Gravity.END }
         buttons.addView(Button(this).apply { text = "연결 테스트"; setOnClickListener { testConnection() } })
+        buttons.addView(Button(this).apply { text = "자동 검색"; setOnClickListener { discoverServer() } })
         buttons.addView(Button(this).apply { text = "현재 URL 열기"; setOnClickListener { save(); openMain() } })
         buttons.addView(Button(this).apply { text = "앱 재시작"; setOnClickListener { save(); openMain() } })
         buttons.addView(Button(this).apply { text = "기본값 복원"; setOnClickListener { restoreDefaults() } })
@@ -90,6 +91,21 @@ class SettingsActivity : Activity() {
                 "서버에 연결할 수 없습니다"
             }
             runOnUiThread { Toast.makeText(this, result, Toast.LENGTH_LONG).show() }
+        }.start()
+    }
+
+    private fun discoverServer() {
+        val seed = baseUrl.text.toString().trim()
+        Thread {
+            val found = ServerDiscovery.discover(seed)
+            runOnUiThread {
+                if (found.isNullOrBlank()) {
+                    Toast.makeText(this, "같은 네트워크에서 HUBONE 서버를 찾지 못했습니다.", Toast.LENGTH_LONG).show()
+                } else {
+                    baseUrl.setText(found)
+                    Toast.makeText(this, "HUBONE 서버를 찾았습니다.", Toast.LENGTH_LONG).show()
+                }
+            }
         }.start()
     }
 }

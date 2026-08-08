@@ -30,6 +30,7 @@ class MainActivity : Activity() {
     private var touchCount = 0
     private var lastTouchAt = 0L
     private var fileCallback: ValueCallback<Array<Uri>>? = null
+    private var discoveryStarted = false
 
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -138,6 +139,7 @@ class MainActivity : Activity() {
         val uri = Uri.parse(target)
         if (!isAllowed(uri)) {
             showError()
+            startAutoDiscovery()
             return
         }
         lastLoadedUrl = target
@@ -153,6 +155,22 @@ class MainActivity : Activity() {
     }
 
     private fun showError() { errorView.visibility = View.VISIBLE }
+
+    private fun startAutoDiscovery() {
+        if (discoveryStarted) return
+        discoveryStarted = true
+        Thread {
+            val discovered = ServerDiscovery.discover(config.baseUrl)
+            runOnUiThread {
+                discoveryStarted = false
+                if (!discovered.isNullOrBlank()) {
+                    config = config.copy(baseUrl = discovered)
+                    config.save(this)
+                    loadConfiguredPage()
+                }
+            }
+        }.start()
+    }
 
     private fun openAdmin() { startActivity(Intent(this, SettingsActivity::class.java)) }
 
@@ -192,11 +210,17 @@ class MainActivity : Activity() {
         }
 
         override fun onReceivedError(view: WebView, request: WebResourceRequest, error: android.webkit.WebResourceError) {
-            if (request.isForMainFrame) showError()
+            if (request.isForMainFrame) {
+                showError()
+                startAutoDiscovery()
+            }
         }
 
         override fun onReceivedHttpError(view: WebView, request: WebResourceRequest, errorResponse: android.webkit.WebResourceResponse) {
-            if (request.isForMainFrame && errorResponse.statusCode >= 500) showError()
+            if (request.isForMainFrame && errorResponse.statusCode >= 500) {
+                showError()
+                startAutoDiscovery()
+            }
         }
     }
 

@@ -31,7 +31,7 @@ data class AgentConfig(
             )
         }
 
-        const val DEFAULT_BASE_URL = "http://192.168.0.100:8000"
+        const val DEFAULT_BASE_URL = "http://192.168.0.100:8001"
         const val DEFAULT_SCREEN_ID = "kiosk1"
     }
 }
