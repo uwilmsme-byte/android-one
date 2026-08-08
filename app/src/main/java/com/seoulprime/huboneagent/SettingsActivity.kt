@@ -48,7 +48,7 @@ class SettingsActivity : Activity() {
         return EditText(this).also {
             it.hint = hint
             it.setText(value)
-            it.singleLine = true
+            it.isSingleLine = true
             root.addView(it, LinearLayout.LayoutParams(-1, -2))
         }
     }

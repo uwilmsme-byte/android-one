@@ -7,6 +7,7 @@ import java.net.NetworkInterface
 import java.net.URL
 import java.util.Collections
 import java.util.concurrent.CompletionService
+import java.util.concurrent.Callable
 import java.util.concurrent.ExecutorCompletionService
 import java.util.concurrent.Executors
 
@@ -25,7 +26,7 @@ object ServerDiscovery {
         val executor = Executors.newFixedThreadPool(16)
         val completion: CompletionService<String?> = ExecutorCompletionService(executor)
         val futures = candidates.map { candidate ->
-            completion.submit<String?> { if (probe(candidate) != null) candidate else null }
+            completion.submit(Callable<String?> { if (probe(candidate) != null) candidate else null })
         }
         try {
             repeat(futures.size) {
