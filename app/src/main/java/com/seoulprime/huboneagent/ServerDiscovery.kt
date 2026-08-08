@@ -12,7 +12,7 @@ import java.util.concurrent.Executors
 
 /** Android port of the existing HUBONE desktop ServerDiscovery rules. */
 object ServerDiscovery {
-    private val preferredPorts = intArrayOf(8001, 8000, 80, 443)
+    private val preferredPorts = intArrayOf(8001, 8000)
 
     fun discover(savedUrl: String): String? {
         val normalizedSaved = normalize(savedUrl)
@@ -45,7 +45,7 @@ object ServerDiscovery {
         val seen = linkedSetOf<String>()
         fun add(url: String?) { normalize(url)?.let { seen.add(it) } }
         add(savedUrl)
-        val savedPort = Uri.parse(savedUrl).port.takeIf { it > 0 }
+        val savedPort = Uri.parse(savedUrl).port.takeIf { it == 8001 || it == 8000 }
         val ports = buildList {
             savedPort?.let { add(it) }
             preferredPorts.forEach { if (!contains(it)) add(it) }
@@ -60,7 +60,7 @@ object ServerDiscovery {
             val prefix = "${octets[0]}.${octets[1]}.${octets[2]}"
             for (host in 1..254) {
                 ports.forEach { port ->
-                    add(buildUrl(if (port == 443) "https" else "http", "$prefix.$host", port))
+                    add(buildUrl("http", "$prefix.$host", port))
                 }
             }
         }
@@ -109,12 +109,10 @@ object ServerDiscovery {
         val scheme = uri.scheme?.lowercase() ?: return null
         val host = uri.host ?: return null
         if (scheme != "http" && scheme != "https") return null
-        return buildUrl(scheme, host, uri.port)
+        return if (uri.port > 0) "$scheme://$host:${uri.port}" else "$scheme://$host"
     }
 
     private fun buildUrl(scheme: String, host: String, port: Int): String {
-        val defaultPort = (scheme == "http" && port <= 0 || scheme == "http" && port == 80) ||
-            (scheme == "https" && port == 443)
-        return if (defaultPort) "$scheme://$host" else "$scheme://$host:$port"
+        return "$scheme://$host:$port"
     }
 }
