@@ -174,23 +174,26 @@ class CommandPollService : Service() {
     // 앞에 가져온다. MainActivity가 singleTask라 기존 인스턴스가 있으면 onNewIntent로,
     // 없으면 onCreate로 EXTRA_SCREEN_COMMAND를 받아 화면을 전환한다.
     private fun bringMainActivityToFront(screen: String): Pair<Boolean, String> {
-        CommandPollState.currentScreen = screen
+        // 실제 겪은 버그: 여기서 CommandPollState.currentScreen을 먼저 바꿔버리면, 아래
+        // startActivity()가 실제로는 실패해도(백그라운드 활동 시작 제한 등) 보드에는
+        // "성공한 것처럼" 상태가 찍혀서 원인을 알 수 없었다 — 성공했을 때만 갱신한다.
         val intent = Intent(this, MainActivity::class.java).apply {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
             putExtra(MainActivity.EXTRA_SCREEN_COMMAND, screen)
         }
         return try {
             startActivity(intent)
+            CommandPollState.currentScreen = screen
             true to "Android One 화면으로 포커스를 전환했습니다."
         } catch (e: Exception) {
-            // 일부 OEM/키오스크 정책이 백그라운드 서비스의 액티비티 기동을 막을 수 있다 —
+            // 안드로이드 10+ "백그라운드 활동 시작 제한"에 걸리면 여기서 SecurityException 등이
+            // 날 수 있다 — 이 메시지가 보드에 그대로 뜨니 실제 원인을 여기서 확인 가능하다.
             // 다음 폴링에서도 새 명령이 오면 계속 재시도된다.
-            false to "Android One 포커스 전환 실패: ${e.message ?: "unknown"}"
+            false to "Android One 포커스 전환 실패: ${e.javaClass.simpleName}: ${e.message ?: "unknown"}"
         }
     }
 
     private fun launchDentWeb(): Pair<Boolean, String> {
-        CommandPollState.currentScreen = CommandPollState.SCREEN_DENTWEB
         val config = AgentConfig.load(this)
         val pkg = config.dentwebPackage.trim()
         if (pkg.isBlank()) {
@@ -205,9 +208,12 @@ class CommandPollService : Service() {
         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
         return try {
             startActivity(intent)
+            CommandPollState.currentScreen = CommandPollState.SCREEN_DENTWEB
             true to "덴트웹 앱으로 포커스를 전환했습니다."
         } catch (e: Exception) {
-            false to "덴트웹 앱 실행 실패: ${e.message ?: "unknown"}"
+            // 안드로이드 10+ "백그라운드 활동 시작 제한"에 걸리면 여기서 SecurityException 등이
+            // 날 수 있다 — 이 메시지가 보드에 그대로 뜨니 실제 원인을 여기서 확인 가능하다.
+            false to "덴트웹 앱 실행 실패: ${e.javaClass.simpleName}: ${e.message ?: "unknown"}"
         }
     }
 
