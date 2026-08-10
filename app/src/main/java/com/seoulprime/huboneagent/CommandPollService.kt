@@ -105,8 +105,17 @@ class CommandPollService : Service() {
         // 실제 전면 앱을 확인할 권한(사용정보 접근)이 없으면(detected == null) 우리가 마지막으로
         // 내린 명령 기준으로 추정한다 — 최소한의 폴백, 권한을 허용하면 훨씬 정확해진다.
         val externalDentweb = detected ?: (CommandPollState.currentScreen == CommandPollState.SCREEN_DENTWEB)
+        // 실제 겪을 뻔한 버그: UsageStats가 "덴트웹이 진짜 전면"이라고 확인해줘도(수동으로
+        // 연 경우 등, 우리가 낸 명령과 무관하게) currentScreen을 안 맞춰주면 보드에는 여전히
+        // 예전 화면(contact/reservation)으로 보였다 — externalDentweb을 기준으로 재조정한다.
+        // 반대 방향(덴트웹인 줄 알았는데 사용자가 수동으로 이 앱에 복귀한 경우)은 여기서
+        // 추측하지 않는다 — MainActivity.onResume()이 실제 currentScreenPath로 정확히
+        // 갱신해준다(다음 폴링 주기에 반영됨).
+        if (externalDentweb) {
+            CommandPollState.currentScreen = CommandPollState.SCREEN_DENTWEB
+        }
         val currentScreen = CommandPollState.currentScreen
-        val focused = CommandPollState.currentScreen != CommandPollState.SCREEN_DENTWEB && CommandPollState.windowFocused
+        val focused = !externalDentweb && CommandPollState.windowFocused
         val statusMessage = if (detected == null) "전면 앱 확인 권한이 없어 덴트웹 앱 상태를 추정치로만 보고합니다."
             else CommandPollState.lastStatusMessage
 

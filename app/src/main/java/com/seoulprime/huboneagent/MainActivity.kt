@@ -169,6 +169,11 @@ class MainActivity : Activity() {
     override fun onResume() {
         super.onResume()
         if (::webView.isInitialized) {
+            // 명령 없이 사용자가 수동으로 이 화면에 돌아온 경우(예: 덴트웹에서 스와이프/뒤로가기)
+            // 도 여기서 바로 잡아준다 — CommandPollService는 이 반대 방향을 추측하지 않고
+            // MainActivity가 실제로 보여주는 화면을 기준으로 여기서 정확히 갱신한다.
+            CommandPollState.currentScreen = if (currentScreenPath == SCREEN_PATH_RESERVATION)
+                CommandPollState.SCREEN_RESERVATION else CommandPollState.SCREEN_CONTACT
             val latest = AgentConfig.load(this)
             if (latest.baseUrl != config.baseUrl || latest.screenId != config.screenId) {
                 config = latest
