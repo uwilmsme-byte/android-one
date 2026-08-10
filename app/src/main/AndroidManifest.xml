@@ -27,6 +27,17 @@
          (공장초기화/기기소유자 지정 불필요, 설정 토글 하나로 끝남). -->
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
 
+    <!-- 안드로이드 11+ 패키지 가시성(Package Visibility) 제한 — 이걸 선언 안 하면 다른 앱은
+         우리한테 아예 "존재하지 않는" 것처럼 보여서 packageManager.getLaunchIntentForPackage()가
+         항상 null을 반환한다(실제 로그로 확인된 원인 — logcat: "AppsFilter: interaction:
+         ... -> PackageSetting{... kr.co.DentWeb.DentWebCustomer ...} BLOCKED"). 오버레이/
+         백그라운드 실행 제한과는 별개의, 더 근본적인 차단 원인이었다.
+         DENTWEB_PACKAGE를 관리자 설정에서 다른 값으로 바꾸면 이 목록도 같이 바꿔야 한다
+         (queries는 컴파일 타임 선언이라 런타임 설정만으로는 안 풀림). -->
+    <queries>
+        <package android:name="kr.co.DentWeb.DentWebCustomer" />
+    </queries>
+
     <application
         android:allowBackup="false"
         android:label="HUBONE Agent"
