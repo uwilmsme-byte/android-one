@@ -227,6 +227,10 @@ class MainActivity : Activity() {
         lastLoadedUrl = target
         errorView.visibility = View.GONE
         webView.loadUrl(target)
+        // 명령 수신 후 이 화면이 실제 입력 대상이 되도록 포커스를 되돌린다 — URL만 바꾸면
+        // 방금까지 떠 있던 다른 화면(덴트웹 등)에 포커스가 남아 터치가 안 먹는 경우가 있다.
+        window.decorView.requestFocus()
+        webView.requestFocus(View.FOCUS_DOWN)
     }
 
     private fun isAllowed(uri: Uri): Boolean {
@@ -293,6 +297,8 @@ class MainActivity : Activity() {
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
+        // CommandPollService의 focused 보고에 쓰인다 — 허브원 보드 탭 상태 표시용.
+        CommandPollState.windowFocused = hasFocus
         if (hasFocus) enterImmersiveMode()
     }
 

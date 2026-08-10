@@ -17,4 +17,15 @@ object CommandPollState {
 
     @Volatile
     var currentScreen: String = SCREEN_CONTACT
+
+    // MainActivity.onWindowFocusChanged가 갱신 — 우리 화면이 실제로 입력 포커스를 갖고
+    // 있는지(다른 오버레이/시스템 UI에 포커스를 뺏겼을 수 있음)를 Service의 focused 보고에
+    // 반영한다. dentweb 화면일 때는 애초에 우리 창이 없으므로 이 값과 무관하게 false로 취급.
+    @Volatile
+    var windowFocused: Boolean = false
+
+    // 마지막으로 시도한 명령의 결과 메시지 — 다음 폴링에서 status_message로 서버에
+    // 보고해 허브원 보드 탭에 바로 보이게 한다(예: "덴트웹 앱을 찾을 수 없습니다: ...").
+    @Volatile
+    var lastStatusMessage: String = ""
 }

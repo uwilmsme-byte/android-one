@@ -4,6 +4,7 @@ import android.app.Activity
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
+import android.provider.Settings
 import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
@@ -48,6 +49,25 @@ class SettingsActivity : Activity() {
             textSize = 13f
         })
         dentwebPackage = addField(root, "DENTWEB_PACKAGE (예: com.example.dentweb)", config.dentwebPackage)
+
+        // 사용정보 접근(PACKAGE_USAGE_STATS)은 일반 권한창으로 못 받는 특수 권한이라
+        // 시스템 설정 화면으로 직접 보내야 한다 — 허용하면 보드 탭에 덴트웹 앱이 실제
+        // 전면인지 정확히 표시되고(추정치가 아니라), 허용 안 해도 앱은 정상 동작한다
+        // (마지막으로 내린 명령 기준 추정치로 자동 폴백).
+        root.addView(Button(this).apply {
+            text = "전면 앱 확인 권한 허용"
+            textSize = 15f
+            minHeight = 100
+            setOnClickListener {
+                startActivity(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS))
+                Toast.makeText(this@SettingsActivity, "목록에서 HUBONE Agent의 사용 기록 접근을 허용하세요.", Toast.LENGTH_LONG).show()
+            }
+        })
+        root.addView(TextView(this).apply {
+            text = "허용하면 허브원 보드 탭에서 덴트웹 환자용 앱이 실제 전면인지 정확히 표시합니다. 허용 안 해도 동작은 하되 추정치로만 표시됩니다."
+            textSize = 12f
+            setPadding(0, 4, 0, 4)
+        })
 
         // 태블릿 터치 조작 기준 — 버튼이 작아서 누르기 힘들다는 실제 지적 사항. 폭을 채우는
         // 2열 그리드로 바꾸고, 최소 높이·글자크기·여백을 태블릿 터치에 맞게 키웠다.

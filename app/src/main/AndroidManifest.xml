@@ -1,4 +1,5 @@
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
@@ -12,6 +13,12 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- 덴트웹 환자용 앱이 실제로 전면에 있는지 확인하기 위한 특수 권한 — 일반 런타임
+         권한창으로는 요청 불가, 관리자 설정의 "전면 앱 확인 권한 허용" 버튼으로 사용자가
+         설정 > 앱 > 특수 접근 > 사용정보 접근에서 직접 허용해야 한다. 허용 안 해도 앱은
+         정상 동작하고(마지막으로 내린 명령 기준 추정치로 폴백), 정확도만 낮아진다. -->
+    <uses-permission android:name="android.permission.PACKAGE_USAGE_STATS"
+        tools:ignore="ProtectedPermissions" />
 
     <application
         android:allowBackup="false"
