@@ -3,12 +3,15 @@ package com.seoulprime.huboneagent
 import android.Manifest
 import android.annotation.SuppressLint
 import android.app.Activity
+import android.app.AppOpsManager
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Color
 import android.media.MediaRecorder
 import android.net.Uri
 import android.os.Bundle
+import android.os.Process
+import android.provider.Settings
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
@@ -146,6 +149,9 @@ class MainActivity : Activity() {
         root.addView(errorView, FrameLayout.LayoutParams(-1, -1))
         root.addView(buildCornerTrigger(), FrameLayout.LayoutParams(140, 140, Gravity.TOP or Gravity.END))
         setContentView(root)
+        if (needsPermissionSetup()) {
+            startActivity(Intent(this, SettingsActivity::class.java))
+        }
         applyScreenExtra(intent)
         loadConfiguredPage()
         // 화면전환 명령 폴링은 이 Activity의 생명주기와 분리된 포그라운드 서비스가 전담한다
@@ -294,6 +300,19 @@ class MainActivity : Activity() {
     }
 
     private fun openAdmin() { startActivity(Intent(this, SettingsActivity::class.java)) }
+
+    private fun needsPermissionSetup(): Boolean {
+        val cameraMissing = checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED
+        val audioMissing = checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED
+        val usageMissing = !hasUsageAccess()
+        val overlayMissing = android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M && !Settings.canDrawOverlays(this)
+        return cameraMissing || audioMissing || usageMissing || overlayMissing
+    }
+
+    private fun hasUsageAccess(): Boolean {
+        val appOps = getSystemService(AppOpsManager::class.java)
+        return appOps?.checkOpNoThrow(AppOpsManager.OPSTR_GET_USAGE_STATS, Process.myUid(), packageName) == AppOpsManager.MODE_ALLOWED
+    }
 
     private fun applyScreenPolicy() {
         if (config.keepScreenOn) window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)

@@ -1,9 +1,13 @@
 package com.seoulprime.huboneagent
 
 import android.app.Activity
+import android.app.AppOpsManager
+import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Bundle
+import android.os.Process
 import android.provider.Settings
 import android.widget.Button
 import android.widget.EditText
@@ -17,6 +21,10 @@ class SettingsActivity : Activity() {
     private lateinit var baseUrl: EditText
     private lateinit var screenId: EditText
     private lateinit var dentwebPackage: EditText
+    private lateinit var cameraPermissionButton: Button
+    private lateinit var microphonePermissionButton: Button
+    private lateinit var usagePermissionButton: Button
+    private lateinit var overlayPermissionButton: Button
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -54,15 +62,32 @@ class SettingsActivity : Activity() {
         // 시스템 설정 화면으로 직접 보내야 한다 — 허용하면 보드 탭에 덴트웹 앱이 실제
         // 전면인지 정확히 표시되고(추정치가 아니라), 허용 안 해도 앱은 정상 동작한다
         // (마지막으로 내린 명령 기준 추정치로 자동 폴백).
-        root.addView(Button(this).apply {
-            text = "전면 앱 확인 권한 허용"
-            textSize = 15f
-            minHeight = 100
-            setOnClickListener {
-                startActivity(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS))
-                Toast.makeText(this@SettingsActivity, "목록에서 HUBONE Agent의 사용 기록 접근을 허용하세요.", Toast.LENGTH_LONG).show()
+        val permissionRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, 12, 0, 0)
+        }
+        fun permissionButton(label: String, onClick: () -> Unit): Button {
+            return Button(this).apply {
+                text = label
+                textSize = 13f
+                minHeight = 100
+                setOnClickListener { onClick() }
             }
-        })
+        }
+        cameraPermissionButton = permissionButton("카메라\n허용") { requestRuntimePermission(Manifest.permission.CAMERA) }
+        microphonePermissionButton = permissionButton("마이크\n허용") { requestRuntimePermission(Manifest.permission.RECORD_AUDIO) }
+        usagePermissionButton = permissionButton("전면 앱 확인\n허용") {
+            startActivity(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS))
+            Toast.makeText(this@SettingsActivity, "목록에서 HUBONE Agent의 사용 기록 접근을 허용하세요.", Toast.LENGTH_LONG).show()
+        }
+        overlayPermissionButton = permissionButton("화면 위 표시\n허용") {
+            startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")))
+            Toast.makeText(this@SettingsActivity, "목록에서 HUBONE Agent를 켜주세요.", Toast.LENGTH_LONG).show()
+        }
+        listOf(cameraPermissionButton, microphonePermissionButton, usagePermissionButton, overlayPermissionButton).forEach { button ->
+            permissionRow.addView(button, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = 8 })
+        }
+        root.addView(permissionRow)
         root.addView(TextView(this).apply {
             text = "허용하면 허브원 보드 탭에서 덴트웹 환자용 앱이 실제 전면인지 정확히 표시합니다. 허용 안 해도 동작은 하되 추정치로만 표시됩니다."
             textSize = 12f
@@ -74,15 +99,6 @@ class SettingsActivity : Activity() {
         // 위에 표시" 허용은 공장초기화·기기소유자 지정 없이 설정 토글 하나로 끝나는 가벼운
         // 대응책 — 허용하면 앱이 안 보이는 1x1 오버레이 창을 계속 띄워둬서 "보이는 창이
         // 있는 앱" 예외 조건을 만족시킨다.
-        root.addView(Button(this).apply {
-            text = "다른 앱 위에 표시 허용"
-            textSize = 15f
-            minHeight = 100
-            setOnClickListener {
-                startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")))
-                Toast.makeText(this@SettingsActivity, "목록에서 HUBONE Agent를 켜주세요.", Toast.LENGTH_LONG).show()
-            }
-        })
         root.addView(TextView(this).apply {
             text = "허용하면 화면전환 명령(접수/예약/덴트웹 전환)이 백그라운드 상태에서도 더 안정적으로 적용됩니다. 앱을 완전히 재시작해야 반영됩니다."
             textSize = 12f
@@ -123,6 +139,44 @@ class SettingsActivity : Activity() {
         buttonsGrid.addView(row3)
         root.addView(buttonsGrid)
         setContentView(root)
+        refreshPermissionButtons()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        if (::cameraPermissionButton.isInitialized) refreshPermissionButtons()
+    }
+
+    private fun requestRuntimePermission(permission: String) {
+        if (checkSelfPermission(permission) == PackageManager.PERMISSION_GRANTED) {
+            Toast.makeText(this, "이미 허용된 권한입니다.", Toast.LENGTH_SHORT).show()
+        } else {
+            requestPermissions(arrayOf(permission), RUNTIME_PERMISSION_REQUEST)
+        }
+    }
+
+    private fun refreshPermissionButtons() {
+        cameraPermissionButton.text = runtimePermissionLabel("카메라", Manifest.permission.CAMERA)
+        microphonePermissionButton.text = runtimePermissionLabel("마이크", Manifest.permission.RECORD_AUDIO)
+        usagePermissionButton.text = if (hasUsageAccess()) "전면 앱 확인\n✓ 허용됨" else "전면 앱 확인\n허용"
+        overlayPermissionButton.text = if (Settings.canDrawOverlays(this)) "화면 위 표시\n✓ 허용됨" else "화면 위 표시\n허용"
+    }
+
+    private fun runtimePermissionLabel(name: String, permission: String): String {
+        return if (checkSelfPermission(permission) == PackageManager.PERMISSION_GRANTED) "$name\n✓ 허용됨" else "$name\n허용"
+    }
+
+    private fun hasUsageAccess(): Boolean {
+        val appOps = getSystemService(AppOpsManager::class.java)
+        return appOps?.checkOpNoThrow(AppOpsManager.OPSTR_GET_USAGE_STATS, Process.myUid(), packageName) == AppOpsManager.MODE_ALLOWED
+    }
+
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == RUNTIME_PERMISSION_REQUEST) {
+            refreshPermissionButtons()
+            Toast.makeText(this, if (grantResults.isNotEmpty() && grantResults.all { it == PackageManager.PERMISSION_GRANTED }) "권한이 허용되었습니다." else "권한이 허용되지 않았습니다.", Toast.LENGTH_SHORT).show()
+        }
     }
 
     private fun addField(root: LinearLayout, hint: String, value: String): EditText {
@@ -208,5 +262,9 @@ class SettingsActivity : Activity() {
                 }
             }
         }.start()
+    }
+
+    companion object {
+        private const val RUNTIME_PERMISSION_REQUEST = 71
     }
 }
