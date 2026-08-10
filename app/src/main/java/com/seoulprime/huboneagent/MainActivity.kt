@@ -25,7 +25,6 @@ import android.widget.Button
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.TextView
-import android.widget.Toast
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import org.json.JSONObject
@@ -57,11 +56,6 @@ class MainActivity : Activity() {
     // 상담원 화면(HUBONE deskchat)이 접수(/pt)·예약(/pt/reserve) 중 어느 화면을 보여줄지
     // 원격으로 지시하는 경로. 서버 재시작/앱 재시작과 무관하게 항상 접수 화면이 기본이다.
     private var currentScreenPath = SCREEN_PATH_CONTACT
-
-    // deskchat/api/agent_commands.py 폴링 상태 — 3초 간격, Activity가 화면에 보일 때만 실행.
-    private val commandPollHandler = android.os.Handler(android.os.Looper.getMainLooper())
-    private var commandPollRunnable: Runnable? = null
-    private var lastAppliedCommandId = 0
 
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -145,7 +139,31 @@ class MainActivity : Activity() {
         root.addView(errorView, FrameLayout.LayoutParams(-1, -1))
         root.addView(buildCornerTrigger(), FrameLayout.LayoutParams(140, 140, Gravity.TOP or Gravity.END))
         setContentView(root)
+        applyScreenExtra(intent)
         loadConfiguredPage()
+        // 화면전환 명령 폴링은 이 Activity의 생명주기와 분리된 포그라운드 서비스가 전담한다
+        // (실제 요청 사항: "접수, 혹은 예약 화면을 열면 덴트웹 접수 화면에서 /pt,
+        // /pt/reservation으로 화면이 전환되도록" — 예전엔 이 Activity가 백그라운드로
+        // 밀리면(=덴트웹이 앞에 있으면) 폴링 자체가 멈춰서 명령을 받을 수 없었다).
+        CommandPollService.start(this)
+    }
+
+    // CommandPollService가 명령을 받아 이 Activity를 강제로 앞에 가져올 때(덴트웹 화면
+    // 등에서 돌아올 때) singleTask라 onCreate가 아니라 여기로 들어온다.
+    override fun onNewIntent(newIntent: Intent) {
+        super.onNewIntent(newIntent)
+        setIntent(newIntent)
+        if (::webView.isInitialized) {
+            applyScreenExtra(newIntent)
+            loadConfiguredPage()
+        }
+    }
+
+    private fun applyScreenExtra(source: Intent?) {
+        when (source?.getStringExtra(EXTRA_SCREEN_COMMAND)) {
+            CommandPollState.SCREEN_RESERVATION -> currentScreenPath = SCREEN_PATH_RESERVATION
+            CommandPollState.SCREEN_CONTACT -> currentScreenPath = SCREEN_PATH_CONTACT
+        }
     }
 
     override fun onResume() {
@@ -158,12 +176,6 @@ class MainActivity : Activity() {
                 loadConfiguredPage()
             }
         }
-        startCommandPolling()
-    }
-
-    override fun onPause() {
-        super.onPause()
-        stopCommandPolling()
     }
 
     private fun buildErrorView() = LinearLayout(this).apply {
@@ -198,6 +210,11 @@ class MainActivity : Activity() {
     private fun loadConfiguredPage() {
         config = AgentConfig.load(this)
         applyScreenPolicy()
+        // 이 Activity가 실제로 화면을 그리는 순간을 "현재 화면 상태"의 기준으로 삼는다 —
+        // CommandPollService가 명령을 보낼 때도 미리 갱신해두지만, 런처 아이콘으로 수동
+        // 실행한 경우 등도 여기서 함께 반영된다(허브원 보드 탭의 상태 표시용).
+        CommandPollState.currentScreen = if (currentScreenPath == SCREEN_PATH_RESERVATION)
+            CommandPollState.SCREEN_RESERVATION else CommandPollState.SCREEN_CONTACT
         val base = config.baseUrl.trim().trimEnd('/')
         val screen = config.screenId.trim().ifBlank { AgentConfig.DEFAULT_SCREEN_ID }
         val target = "$base$currentScreenPath?screen_id=${Uri.encode(screen)}"
@@ -210,95 +227,6 @@ class MainActivity : Activity() {
         lastLoadedUrl = target
         errorView.visibility = View.GONE
         webView.loadUrl(target)
-    }
-
-    // ── 화면전환 명령 폴링 (deskchat/api/agent_commands.py, 3초 간격) ──────────
-    // 서버에 아직 WebSocket 원격 명령 채널이 없어(README "현재 미구현 기능"), 이 앱은
-    // HUBONE 웹 전반에서 쓰는 3초 폴링 패턴을 그대로 따른다. Activity가 화면에 보일 때만
-    // 실행하고(onResume/onPause), 실패해도 다음 주기에 조용히 재시도한다.
-    private fun startCommandPolling() {
-        if (commandPollRunnable != null) return
-        val runnable = object : Runnable {
-            override fun run() {
-                pollScreenCommandOnce()
-                commandPollHandler.postDelayed(this, 3_000)
-            }
-        }
-        commandPollRunnable = runnable
-        commandPollHandler.postDelayed(runnable, 3_000)
-    }
-
-    private fun stopCommandPolling() {
-        commandPollRunnable?.let { commandPollHandler.removeCallbacks(it) }
-        commandPollRunnable = null
-    }
-
-    private fun pollScreenCommandOnce() {
-        val base = config.baseUrl.trim().trimEnd('/')
-        val screen = config.screenId.trim().ifBlank { AgentConfig.DEFAULT_SCREEN_ID }
-        if (base.isBlank()) return
-        Thread {
-            val result = fetchScreenCommand(base, screen)
-            if (result != null) {
-                runOnUiThread { applyScreenCommand(result.first, result.second) }
-            }
-        }.start()
-    }
-
-    /** 성공 시 (command_id, command) — command_id가 lastAppliedCommandId와 같으면(새 명령 없음)
-     * command는 null을 넘겨 applyScreenCommand()가 아무 것도 하지 않게 한다. */
-    private fun fetchScreenCommand(base: String, screen: String): Pair<Int, String?>? {
-        val connection = try {
-            URL("$base/api/agent/command?screen_id=${Uri.encode(screen)}").openConnection() as HttpURLConnection
-        } catch (_: Exception) { return null }
-        return try {
-            connection.connectTimeout = 3_000
-            connection.readTimeout = 3_000
-            if (connection.responseCode !in 200..299) return null
-            val body = connection.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
-            val json = JSONObject(body)
-            val commandId = json.optInt("command_id", 0)
-            if (commandId == 0 || commandId == lastAppliedCommandId) return commandId to null
-            val command = json.optString("command", "").ifBlank { null }
-            commandId to command
-        } catch (_: Exception) {
-            null
-        } finally {
-            connection.disconnect()
-        }
-    }
-
-    private fun applyScreenCommand(commandId: Int, command: String?) {
-        if (command.isNullOrBlank()) return
-        lastAppliedCommandId = commandId
-        when (command) {
-            "open_contact" -> {
-                currentScreenPath = SCREEN_PATH_CONTACT
-                loadConfiguredPage()
-            }
-            "open_reservation" -> {
-                currentScreenPath = SCREEN_PATH_RESERVATION
-                loadConfiguredPage()
-            }
-            "return_to_dentweb" -> launchDentWeb()
-        }
-    }
-
-    private fun launchDentWeb() {
-        val pkg = config.dentwebPackage.trim()
-        if (pkg.isBlank()) {
-            Toast.makeText(this, "덴트웹 앱 패키지명이 설정되지 않았습니다. 관리자 설정에서 입력해 주세요.", Toast.LENGTH_LONG).show()
-            return
-        }
-        val intent = try {
-            packageManager.getLaunchIntentForPackage(pkg)
-        } catch (_: Exception) { null }
-        if (intent == null) {
-            Toast.makeText(this, "덴트웹 앱을 찾을 수 없습니다: $pkg", Toast.LENGTH_LONG).show()
-            return
-        }
-        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        startActivity(intent)
     }
 
     private fun isAllowed(uri: Uri): Boolean {
@@ -543,5 +471,10 @@ class MainActivity : Activity() {
         private const val SCREEN_PATH_CONTACT = "/pt"
         private const val SCREEN_PATH_RESERVATION = "/pt/reserve"
         private const val RECORD_AUDIO_PERMISSION_REQUEST = 20
+
+        // CommandPollService가 MainActivity를 강제로 앞에 가져올 때(덴트웹 등에서 복귀)
+        // 어느 화면을 띄울지 실어 보내는 Intent extra 키 — CommandPollState.SCREEN_CONTACT/
+        // SCREEN_RESERVATION 값을 그대로 담는다.
+        const val EXTRA_SCREEN_COMMAND = "screen_command"
     }
 }
