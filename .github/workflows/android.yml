@@ -4,8 +4,8 @@ on:
   workflow_dispatch:
   push:
     paths:
-      - "hubone_agent/**"
-      - ".github/workflows/hubone-agent-android-debug.yml"
+      - "app/**"
+      - ".github/workflows/android.yml"
 
 jobs:
   build:
