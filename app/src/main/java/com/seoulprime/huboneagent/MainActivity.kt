@@ -100,19 +100,26 @@ class MainActivity : Activity() {
                 override fun onPermissionRequest(request: PermissionRequest) {
                     runOnUiThread {
                         val needsAudio = request.resources.contains(PermissionRequest.RESOURCE_AUDIO_CAPTURE)
-                        if (!needsAudio) {
+                        val needsCamera = request.resources.contains(PermissionRequest.RESOURCE_VIDEO_CAPTURE)
+                        if (!needsAudio && !needsCamera) {
                             request.deny()
                             return@runOnUiThread
                         }
-                        if (ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.RECORD_AUDIO)
-                            == PackageManager.PERMISSION_GRANTED
-                        ) {
+                        val missing = buildList {
+                            if (needsAudio && ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+                                add(Manifest.permission.RECORD_AUDIO)
+                            }
+                            if (needsCamera && ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
+                                add(Manifest.permission.CAMERA)
+                            }
+                        }
+                        if (missing.isEmpty()) {
                             request.grant(request.resources)
                         } else {
                             pendingPermissionRequest = request
                             ActivityCompat.requestPermissions(
                                 this@MainActivity,
-                                arrayOf(Manifest.permission.RECORD_AUDIO),
+                                missing.toTypedArray(),
                                 RECORD_AUDIO_PERMISSION_REQUEST
                             )
                         }
@@ -327,7 +334,7 @@ class MainActivity : Activity() {
     ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (requestCode != RECORD_AUDIO_PERMISSION_REQUEST) return
-        val granted = grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED
+        val granted = grantResults.isNotEmpty() && grantResults.all { it == PackageManager.PERMISSION_GRANTED }
 
         // 이 요청 코드는 두 경로가 같이 쓴다 — 웹 getUserMedia(PermissionRequest)와
         // 네이티브 HubOneAudio.startRecording(). 둘 중 실제로 대기 중이던 쪽만 처리한다.
