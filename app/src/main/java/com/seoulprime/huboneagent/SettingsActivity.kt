@@ -16,6 +16,7 @@ import java.net.URL
 class SettingsActivity : Activity() {
     private lateinit var baseUrl: EditText
     private lateinit var screenId: EditText
+    private lateinit var dentwebPackage: EditText
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -32,6 +33,12 @@ class SettingsActivity : Activity() {
         })
         baseUrl = addField(root, "HUBONE_BASE_URL", config.baseUrl)
         screenId = addField(root, "SCREEN_ID", config.screenId)
+        root.addView(TextView(this).apply {
+            text = "덴트웹 앱 패키지명 — 기본값은 고객용 앱(kr.co.DentWeb.DentWebCustomer). 실기기 사정에 따라 다르면 adb shell pm list packages 등으로 확인 후 바꿔서 입력. 비워두면 \"덴트웹으로 전환\" 명령을 무시합니다."
+            setPadding(0, 12, 0, 4)
+            textSize = 13f
+        })
+        dentwebPackage = addField(root, "DENTWEB_PACKAGE (예: com.example.dentweb)", config.dentwebPackage)
 
         val buttons = LinearLayout(this).apply { gravity = Gravity.END }
         buttons.addView(Button(this).apply { text = "연결 테스트"; setOnClickListener { testConnection() } })
@@ -62,7 +69,8 @@ class SettingsActivity : Activity() {
     private fun save() {
         AgentConfig(
             baseUrl = baseUrl.text.toString().trim(),
-            screenId = screenId.text.toString().trim().ifBlank { AgentConfig.DEFAULT_SCREEN_ID }
+            screenId = screenId.text.toString().trim().ifBlank { AgentConfig.DEFAULT_SCREEN_ID },
+            dentwebPackage = dentwebPackage.text.toString().trim()
         ).save(this)
         Toast.makeText(this, "저장되었습니다.", Toast.LENGTH_SHORT).show()
     }
@@ -70,6 +78,7 @@ class SettingsActivity : Activity() {
     private fun restoreDefaults() {
         baseUrl.setText(AgentConfig.DEFAULT_BASE_URL)
         screenId.setText(AgentConfig.DEFAULT_SCREEN_ID)
+        dentwebPackage.setText(AgentConfig.DEFAULT_DENTWEB_PACKAGE)
     }
 
     private fun openMain() {

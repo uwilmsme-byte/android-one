@@ -2,6 +2,9 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <!-- 예약 태블릿(/pt/reserve)의 실시간 통역 마이크(getUserMedia/네이티브 녹음)를
+         웹뷰가 승인할 수 있으려면 이 선언이 있어야 한다. -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
 
     <application
         android:allowBackup="false"

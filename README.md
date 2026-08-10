@@ -4,26 +4,27 @@
 
 HUBONE Agent는 서울프라임치과의 접수 태블릿에서 기존 HUBONE 서버의 환자용 접수 화면을 안정적으로 표시하기 위한 Android 네이티브 키오스크 앱입니다.
 
-태블릿에서 별도의 환자용 웹 화면을 새로 개발하지 않고, 서버가 제공하는 `/pt` 페이지를 Android WebView로 엽니다. 환자는 태블릿 화면을 직접 터치해 외국인 접수에 필요한 연락처와 기초 정보를 입력할 수 있습니다.
+태블릿에서 별도의 환자용 웹 화면을 새로 개발하지 않고, 서버가 제공하는 `/pt`(접수)·`/pt/reserve`(예약) 페이지를 Android WebView로 엽니다. 환자는 태블릿 화면을 직접 터치해 외국인 접수에 필요한 연락처·기초 정보 입력, 예약 희망일 선택을 할 수 있습니다.
 
 현재 앱의 책임 범위는 다음과 같습니다.
 
-- HUBONE 환자용 접수 페이지 표시
+- HUBONE 환자용 접수 페이지(`/pt`)·예약 페이지(`/pt/reserve`) 표시
 - 가로 화면 전체화면 운영
 - 화면 꺼짐 방지
 - JavaScript, DOM Storage, 쿠키, 파일 업로드 지원
 - 네트워크 장애 시 오류 화면과 재시도 제공
 - 내부 LAN에서 HUBONE 서버 자동 검색
-- 관리자 설정을 통한 서버 주소와 화면 식별자 변경
+- 관리자 설정을 통한 서버 주소·화면 식별자·덴트웹 앱 패키지명 변경
+- HUBONE 서버(`/api/agent/command`)를 3초 폴링해 상담원 화면의 화면전환 지시를 따름: 접수화면 전환, 예약화면 전환, 덴트웹 앱 전환
 
 환자 정보 저장, 번역, 통역상담, 예약 로직은 앱에 포함하지 않습니다. 해당 기능은 기존 HUBONE 웹과 서버가 담당합니다.
 
 ## 접속 URL
 
-앱은 다음 URL을 조합해 엽니다.
+앱은 다음 URL을 조합해 엽니다. 현재 화면 경로(`/pt` 또는 `/pt/reserve`)는 원격 명령으로 바뀌며, 기본값은 항상 `/pt`입니다.
 
 ```text
-${HUBONE_BASE_URL}/pt?screen_id=${SCREEN_ID}
+${HUBONE_BASE_URL}${CURRENT_SCREEN_PATH}?screen_id=${SCREEN_ID}
 ```
 
 기본값:
@@ -31,9 +32,28 @@ ${HUBONE_BASE_URL}/pt?screen_id=${SCREEN_ID}
 ```text
 HUBONE_BASE_URL = http://192.168.0.100:8001
 SCREEN_ID = kiosk1
+CURRENT_SCREEN_PATH = /pt
 ```
 
 `HUBONE_BASE_URL`은 APK에 운영 주소로 고정하지 않았습니다. 기본값은 초기 설치 편의를 위한 예시 설정이며, 관리자 화면에서 실제 병원 서버 주소로 변경해야 합니다.
+
+## 화면전환 명령 (상담원 → 태블릿)
+
+HUBONE 서버의 상담원 화면(예: 예약 태블릿 검토 패널)이 `POST ${HUBONE_BASE_URL}/api/agent/command`로 `{screen_id, command}`를 보내면, 이 태블릿은 3초마다 `GET ${HUBONE_BASE_URL}/api/agent/command?screen_id=${SCREEN_ID}`를 폴링해 자신의 `SCREEN_ID`로 온 최신 명령을 확인하고 실행합니다.
+
+지원 명령:
+
+```text
+open_contact        → /pt 로 전환
+open_reservation     → /pt/reserve 로 전환
+return_to_dentweb    → 설정된 DENTWEB_PACKAGE 앱으로 전환(PackageManager.getLaunchIntentForPackage)
+```
+
+`DENTWEB_PACKAGE`가 비어 있으면 `return_to_dentweb` 명령은 Toast 안내만 표시하고 아무 동작도 하지 않습니다 — 실기기에서 덴트웹 앱의 실제 패키지명을 확인해 관리자 설정에 입력해야 합니다(`adb shell pm list packages` 등).
+
+명령 폴링은 Activity가 화면에 보일 때만 동작합니다(`onResume`에서 시작, `onPause`에서 중단) — 덴트웹 앱으로 전환된 동안에는 폴링을 하지 않다가, 사용자가 다시 이 앱으로 돌아오면(`onResume`) 재개됩니다. 덴트웹 앱 쪽에서 이 앱으로 자동 복귀하는 기능은 덴트웹 앱의 협조가 필요해 이번 범위에 포함하지 않았습니다 — 스와이프/최근 앱 전환 등 수동 복귀를 전제로 합니다.
+
+같은 물리 태블릿 한 대가 접수·예약·덴트웹을 모두 오가는 배포라면, HUBONE 서버 쪽에서 접수/예약 전송 버튼이 이 태블릿의 `SCREEN_ID`와 동일한 `screen_id`로 명령을 보내도록 맞춰야 합니다(서버 저장소 `deskchat/static/js/index_utility_panel.js`의 `CONTACT_TABLET_SCREEN_ID`/`RESERVATION_TABLET_SCREEN_ID` 상수 — 태블릿을 두 대 쓰는 배포라면 기본값을 그대로 둡니다).
 
 ## 서버 자동 검색
 
@@ -59,6 +79,7 @@ SCREEN_ID = kiosk1
 
 - `HUBONE_BASE_URL`
 - `SCREEN_ID`
+- `DENTWEB_PACKAGE` (덴트웹 앱 패키지명 — `return_to_dentweb` 명령 실행에 필요, 비워두면 무시)
 
 버튼:
 
@@ -125,11 +146,11 @@ GitHub Actions의 `Android debug APK` workflow도 동일한 `./gradlew assembleD
 
 다음 기능은 서버 계약과 실제 태블릿 운영 검증 이후 추가합니다.
 
-- `/api/ws` WebSocket 원격 명령
-- Android Agent 등록·인증 API
+- `/api/ws` WebSocket 원격 명령 (현재는 `/api/agent/command` 3초 폴링으로 대체 — 예약 화면전환·DentWeb 전환은 이 방식으로 이미 구현됨)
+- Android Agent 등록·인증 API (현재는 기존 `screen_id` 신뢰 모델 그대로 사용, 별도 device token 없음 — 의도적 결정)
 - 통역상담 화면
-- 예약 캘린더 전환 명령
-- DentWeb 앱 전환
 - 마이크 및 음성인식
 - 완전한 Lock Task 키오스크 모드
 - 실제 태블릿 장치별 배포·업데이트 관리
+- DentWeb 앱 → HUBONE Agent 자동 복귀(덴트웹 앱의 협조가 필요, 이번 범위 제외 — 수동 앱 전환 전제)
+- `DENTWEB_PACKAGE` 실기기 값 확인 및 검증(패키지명은 아직 미확인 상태로 설정 필드만 준비됨)
