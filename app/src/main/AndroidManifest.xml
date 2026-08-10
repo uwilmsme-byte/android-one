@@ -9,6 +9,8 @@
     <application
         android:allowBackup="false"
         android:label="HUBONE Agent"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
         android:usesCleartextTraffic="true">
         <activity

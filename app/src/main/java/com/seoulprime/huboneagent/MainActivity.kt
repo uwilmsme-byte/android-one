@@ -311,6 +311,12 @@ class MainActivity : Activity() {
     private fun showError() { errorView.visibility = View.VISIBLE }
 
     private fun startAutoDiscovery() {
+        // 이미 정상 연결이 검증된 수동 지정 주소는 일시적 접속 실패로도 자동검색이 조용히
+        // 덮어쓰지 않는다(실제 겪은 문제: "IP를 지정하고 저장하니 처음에 반짝하고 다시
+        // 예전 주소가 나옴"). 반대로 아직 한 번도 연결에 성공하지 못한 주소(오타 등)라면
+        // 자동검색이 여전히 도와준다("가장 처음에 ip가 맞지 않아 접속이 안된다면 자동
+        // 스캔을 시도하는게 좋겠음") — AgentConfig.manualBaseUrlVerified 참고.
+        if (config.manualBaseUrl && config.manualBaseUrlVerified) return
         if (discoveryStarted) return
         discoveryStarted = true
         Thread {
@@ -318,12 +324,21 @@ class MainActivity : Activity() {
             runOnUiThread {
                 discoveryStarted = false
                 if (!discovered.isNullOrBlank()) {
-                    config = config.copy(baseUrl = discovered)
+                    config = config.copy(baseUrl = discovered, manualBaseUrl = false, manualBaseUrlVerified = false)
                     config.save(this)
                     loadConfiguredPage()
                 }
             }
         }.start()
+    }
+
+    // 현재 config.baseUrl로 페이지가 정상 로드됐다는 뜻 — 수동 지정 주소였다면 이제부터
+    // "검증됨"으로 잠가서 이후 일시적 접속 실패에도 자동검색이 덮어쓰지 못하게 한다.
+    private fun markBaseUrlVerifiedIfNeeded() {
+        if (config.manualBaseUrl && !config.manualBaseUrlVerified) {
+            config = config.copy(manualBaseUrlVerified = true)
+            config.save(this)
+        }
     }
 
     private fun openAdmin() { startActivity(Intent(this, SettingsActivity::class.java)) }
@@ -493,6 +508,11 @@ class MainActivity : Activity() {
     private inner class SafeWebViewClient : WebViewClient() {
         override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
             return !isAllowed(request.url)
+        }
+
+        override fun onPageFinished(view: WebView, url: String?) {
+            super.onPageFinished(view, url)
+            markBaseUrlVerifiedIfNeeded()
         }
 
         override fun onReceivedError(view: WebView, request: WebResourceRequest, error: android.webkit.WebResourceError) {
