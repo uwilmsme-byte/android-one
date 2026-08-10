@@ -26,6 +26,16 @@ class SettingsActivity : Activity() {
             setPadding(28, 20, 28, 20)
         }
         root.addView(TextView(this).apply { text = "HUBONE Agent 관리자 설정"; textSize = 22f })
+        // 실제 겪은 문제: 최신 빌드를 설치했다고 생각했는데 옛날 APK가 그대로 깔려있는 걸
+        // 구분할 방법이 없었다 — 버전을 화면에 바로 보여줘서 adb 없이도 확인 가능하게 한다.
+        root.addView(TextView(this).apply {
+            val versionLabel = try {
+                packageManager.getPackageInfo(packageName, 0).versionName ?: "?"
+            } catch (_: Exception) { "?" }
+            text = "버전: $versionLabel"
+            textSize = 12f
+            setPadding(0, 2, 0, 8)
+        })
         root.addView(TextView(this).apply {
             text = "\${HUBONE_BASE_URL}/pt?screen_id=\${SCREEN_ID} · 기본 포트 8001 자동 검색 지원"
             setPadding(0, 8, 0, 12)
