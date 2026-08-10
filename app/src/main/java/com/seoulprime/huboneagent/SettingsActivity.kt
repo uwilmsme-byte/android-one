@@ -69,6 +69,26 @@ class SettingsActivity : Activity() {
             setPadding(0, 4, 0, 4)
         })
 
+        // 안드로이드 10+ "백그라운드 활동 시작 제한" 때문에 화면전환 명령이 조용히 씹힐 수
+        // 있다(실제 겪은 문제: 상태는 성공으로 찍히는데 태블릿 화면은 안 바뀜). "다른 앱
+        // 위에 표시" 허용은 공장초기화·기기소유자 지정 없이 설정 토글 하나로 끝나는 가벼운
+        // 대응책 — 허용하면 앱이 안 보이는 1x1 오버레이 창을 계속 띄워둬서 "보이는 창이
+        // 있는 앱" 예외 조건을 만족시킨다.
+        root.addView(Button(this).apply {
+            text = "다른 앱 위에 표시 허용"
+            textSize = 15f
+            minHeight = 100
+            setOnClickListener {
+                startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")))
+                Toast.makeText(this@SettingsActivity, "목록에서 HUBONE Agent를 켜주세요.", Toast.LENGTH_LONG).show()
+            }
+        })
+        root.addView(TextView(this).apply {
+            text = "허용하면 화면전환 명령(접수/예약/덴트웹 전환)이 백그라운드 상태에서도 더 안정적으로 적용됩니다. 앱을 완전히 재시작해야 반영됩니다."
+            textSize = 12f
+            setPadding(0, 4, 0, 8)
+        })
+
         // 태블릿 터치 조작 기준 — 버튼이 작아서 누르기 힘들다는 실제 지적 사항. 폭을 채우는
         // 2열 그리드로 바꾸고, 최소 높이·글자크기·여백을 태블릿 터치에 맞게 키웠다.
         val buttonsGrid = LinearLayout(this).apply {

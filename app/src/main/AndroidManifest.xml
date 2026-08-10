@@ -19,6 +19,13 @@
          정상 동작하고(마지막으로 내린 명령 기준 추정치로 폴백), 정확도만 낮아진다. -->
     <uses-permission android:name="android.permission.PACKAGE_USAGE_STATS"
         tools:ignore="ProtectedPermissions" />
+    <!-- 안드로이드 10+ "백그라운드 활동 시작 제한" 때문에 CommandPollService(포그라운드
+         서비스)가 화면전환을 시도해도 조용히 막힐 수 있었다(실제 겪은 문제: 상태는
+         성공으로 찍히는데 실제 화면은 안 바뀜). 이 권한으로 안 보이는 1x1 오버레이 창을
+         계속 띄워두면("보이는 창이 있음" 예외 조건 충족) startActivity()가 더 안정적으로
+         통과한다 — 관리자 설정의 "다른 앱 위에 표시 허용" 버튼으로 사용자가 직접 켜야 한다
+         (공장초기화/기기소유자 지정 불필요, 설정 토글 하나로 끝남). -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
 
     <application
         android:allowBackup="false"

@@ -8,12 +8,16 @@ import android.app.Service
 import android.app.usage.UsageEvents
 import android.app.usage.UsageStatsManager
 import android.content.Intent
+import android.graphics.PixelFormat
 import android.net.Uri
 import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.os.Process
+import android.provider.Settings
+import android.view.View
+import android.view.WindowManager
 import androidx.core.app.NotificationCompat
 import org.json.JSONObject
 import java.net.HttpURLConnection
@@ -46,9 +50,17 @@ class CommandPollService : Service() {
     private var lastForegroundCheckAt = 0L
     private var lastForegroundDentwebState: Boolean? = null
 
+    // 안드로이드 10+ "백그라운드 활동 시작 제한" 대응 — 실제 겪은 문제: 서비스에서
+    // startActivity()가 조용히 무시돼서(예외도 안 남) 명령은 성공으로 찍히는데 실제 화면은
+    // 안 바뀌었다. "보이는 창이 있는 앱"은 이 제한의 예외 대상이라, 사용자가 관리자
+    // 설정에서 "다른 앱 위에 표시"를 허용하면 눈에 안 보이는 1x1 오버레이 창을 계속
+    // 띄워둬서 이 예외 조건을 만족시킨다.
+    private var overlayView: View? = null
+
     override fun onCreate() {
         super.onCreate()
         startForeground(NOTIFICATION_ID, buildNotification())
+        ensureOverlayKeepAlive()
         startPolling()
     }
 
@@ -62,7 +74,41 @@ class CommandPollService : Service() {
 
     override fun onDestroy() {
         pollRunnable?.let { handler.removeCallbacks(it) }
+        removeOverlayKeepAlive()
         super.onDestroy()
+    }
+
+    // 권한을 이 앱 실행 도중에 새로 허용했을 수도 있으니(설정화면 다녀온 뒤) 매 폴링마다
+    // 아직 오버레이가 없으면 다시 시도한다 — 이미 떠 있으면 아무 것도 안 한다.
+    private fun ensureOverlayKeepAlive() {
+        if (overlayView != null) return
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+        if (!Settings.canDrawOverlays(this)) return
+        try {
+            val windowManager = getSystemService(WindowManager::class.java) ?: return
+            val view = View(this)
+            val params = WindowManager.LayoutParams(
+                1, 1,
+                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                    WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                PixelFormat.TRANSLUCENT
+            )
+            view.alpha = 0f
+            windowManager.addView(view, params)
+            overlayView = view
+        } catch (_: Exception) {
+            // 일부 기기/런처가 오버레이 추가를 거부할 수 있다 — 다음 폴링에서 재시도.
+        }
+    }
+
+    private fun removeOverlayKeepAlive() {
+        val view = overlayView ?: return
+        overlayView = null
+        try {
+            getSystemService(WindowManager::class.java)?.removeView(view)
+        } catch (_: Exception) { /* 무시 */ }
     }
 
     private fun buildNotification(): Notification {
@@ -96,6 +142,7 @@ class CommandPollService : Service() {
     }
 
     private fun pollOnce() {
+        ensureOverlayKeepAlive()
         val config = AgentConfig.load(this)
         val base = config.baseUrl.trim().trimEnd('/')
         val screen = config.screenId.trim().ifBlank { AgentConfig.DEFAULT_SCREEN_ID }
