@@ -17,7 +17,7 @@ object ServerDiscovery {
 
     fun discover(savedUrl: String): String? {
         val normalizedSaved = normalize(savedUrl)
-        if (normalizedSaved != null && probe(normalizedSaved) != null) return normalizedSaved
+        if (normalizedSaved != null && probe(normalizedSaved)) return normalizedSaved
 
         val candidates = buildCandidates(savedUrl)
             .filterNot { it.equals(normalizedSaved, ignoreCase = true) }
@@ -26,7 +26,7 @@ object ServerDiscovery {
         val executor = Executors.newFixedThreadPool(16)
         val completion: CompletionService<String?> = ExecutorCompletionService(executor)
         val futures = candidates.map { candidate ->
-            completion.submit(Callable<String?> { if (probe(candidate) != null) candidate else null })
+            completion.submit(Callable<String?> { if (probe(candidate)) candidate else null })
         }
         try {
             repeat(futures.size) {

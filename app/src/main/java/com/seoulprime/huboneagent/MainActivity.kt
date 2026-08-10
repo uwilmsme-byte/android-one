@@ -324,7 +324,15 @@ class MainActivity : Activity() {
             runOnUiThread {
                 discoveryStarted = false
                 if (!discovered.isNullOrBlank()) {
-                    config = config.copy(baseUrl = discovered, manualBaseUrl = false, manualBaseUrlVerified = false)
+                    // discover()가 지금 설정된 주소를 그대로 재확인만 한 경우(같은 값)라면
+                    // 수동 잠금을 풀 이유가 없다 — 실제로 다른 서버로 전환됐을 때만 잠금을
+                    // 해제한다(ServerDiscovery.probe() 버그 수정 후에도 안전하게 유지).
+                    val switchedToDifferentServer = discovered != config.baseUrl
+                    config = config.copy(
+                        baseUrl = discovered,
+                        manualBaseUrl = if (switchedToDifferentServer) false else config.manualBaseUrl,
+                        manualBaseUrlVerified = if (switchedToDifferentServer) false else true
+                    )
                     config.save(this)
                     loadConfiguredPage()
                 }
