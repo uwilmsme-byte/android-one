@@ -66,8 +66,6 @@ class MainActivity : Activity(), LifecycleOwner {
     private lateinit var webView: WebView
     private lateinit var errorView: LinearLayout
     private var lastLoadedUrl = ""
-    private var touchCount = 0
-    private var lastTouchAt = 0L
     private var fileCallback: ValueCallback<Array<Uri>>? = null
     private var discoveryStarted = false
     private var pendingPermissionRequest: PermissionRequest? = null
@@ -171,19 +169,6 @@ class MainActivity : Activity(), LifecycleOwner {
                 }
             }
         }
-        webView.setOnTouchListener { _, event ->
-            if (event.action == MotionEvent.ACTION_UP) {
-                val now = System.currentTimeMillis()
-                touchCount = if (now - lastTouchAt < 1_500) touchCount + 1 else 1
-                lastTouchAt = now
-                if (touchCount >= 5) {
-                    touchCount = 0
-                    openAdmin()
-                }
-            }
-            false
-        }
-
         errorView = buildErrorView()
         val root = FrameLayout(this).apply { setBackgroundColor(Color.WHITE) }
         root.addView(webView, FrameLayout.LayoutParams(-1, -1))
