@@ -512,8 +512,12 @@ class MainActivity : Activity(), LifecycleOwner {
             }
         }
 
+        // mode: "reservation"(/pt/reserve, 기존 동작 — sessionId 사용) |
+        // "contact"(/pt, 신규 — screenId를 sessionId 자리에 넘겨받는다). 페이지 쪽
+        // (foreign_reservation_intake.html / foreign_contact_intake.html) 둘 다
+        // 이 세 번째 인자를 명시적으로 넘긴다.
         @JavascriptInterface
-        fun stopAndUpload(sessionId: String, language: String) {
+        fun stopAndUpload(sessionId: String, language: String, mode: String) {
             runOnUiThread {
                 val recorder = nativeMediaRecorder
                 val file = nativeRecordingFile
@@ -531,7 +535,7 @@ class MainActivity : Activity(), LifecycleOwner {
                     return@runOnUiThread
                 }
                 Thread {
-                    val (ok, message) = uploadVoiceFile(sessionId, language, file)
+                    val (ok, message) = uploadVoiceFile(sessionId, language, file, mode)
                     file.delete()
                     runOnUiThread { notifyJsAudioEvent(if (ok) "uploaded" else "upload_error", message) }
                 }.start()
@@ -780,13 +784,19 @@ class MainActivity : Activity(), LifecycleOwner {
         }
     }
 
-    // 세션 API에 직접 멀티파트 업로드한다 — deskchat/api/foreign_reservation.py의
-    // POST .../voice/transcribe와 동일한 필드(audio, language)를 그대로 맞춘다.
-    private fun uploadVoiceFile(sessionId: String, language: String, file: File): Pair<Boolean, String> {
+    // 세션/화면 API에 직접 멀티파트 업로드한다 — deskchat/api/foreign_reservation.py와
+    // patients.py의 POST .../voice/transcribe와 동일한 필드(audio, language)를 맞춘다.
+    // mode="reservation"이면 sessionIdOrScreenId는 예약 세션 URL 경로(/pt/reserve 기존
+    // 동작), mode="contact"이면 접수 태블릿 화면(screen_id) form 필드로 보낸다(/pt 신규).
+    private fun uploadVoiceFile(sessionIdOrScreenId: String, language: String, file: File, mode: String): Pair<Boolean, String> {
         return try {
             val boundary = "----HubOneBoundary${System.currentTimeMillis()}"
             val base = config.baseUrl.trim().trimEnd('/')
-            val url = URL("$base/api/patients/foreign-reservation/session/${Uri.encode(sessionId)}/voice/transcribe")
+            val isContact = mode == "contact"
+            val url = if (isContact)
+                URL("$base/api/patients/foreign-intake/voice/transcribe")
+            else
+                URL("$base/api/patients/foreign-reservation/session/${Uri.encode(sessionIdOrScreenId)}/voice/transcribe")
             val conn = (url.openConnection() as HttpURLConnection).apply {
                 requestMethod = "POST"
                 doOutput = true
@@ -796,9 +806,13 @@ class MainActivity : Activity(), LifecycleOwner {
             }
             conn.outputStream.use { out ->
                 fun writeText(s: String) = out.write(s.toByteArray(Charsets.UTF_8))
-                writeText("--$boundary\r\n")
-                writeText("Content-Disposition: form-data; name=\"language\"\r\n\r\n")
-                writeText("$language\r\n")
+                fun writeField(name: String, value: String) {
+                    writeText("--$boundary\r\n")
+                    writeText("Content-Disposition: form-data; name=\"$name\"\r\n\r\n")
+                    writeText("$value\r\n")
+                }
+                writeField("language", language)
+                if (isContact) writeField("screen_id", sessionIdOrScreenId)
                 writeText("--$boundary\r\n")
                 writeText("Content-Disposition: form-data; name=\"audio\"; filename=\"voice.m4a\"\r\n")
                 writeText("Content-Type: audio/mp4\r\n\r\n")
