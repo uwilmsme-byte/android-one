@@ -89,6 +89,8 @@ class MainActivity : Activity(), LifecycleOwner {
     private var cameraOverlayContainer: FrameLayout? = null
     private var cameraPreviewView: PreviewView? = null
     private var cameraGuideOverlay: CameraGuideOverlayView? = null
+    private var cameraSwitchButton: Button? = null
+    private var cameraFacing = CameraSelector.LENS_FACING_FRONT
     // CAMERA 런타임 권한을 아직 못 받은 상태에서 startPreview()가 호출된 경우, 승인
     // 결과가 온 뒤 같은 위치로 다시 시작할 수 있도록 요청 당시의 rect를 잠깐 들고 있는다.
     private var pendingCameraPreviewRect: FloatArray? = null
@@ -296,11 +298,28 @@ class MainActivity : Activity(), LifecycleOwner {
             scaleType = PreviewView.ScaleType.FILL_CENTER
         }
         val guide = CameraGuideOverlayView(this)
+        val switchButton = Button(this).apply {
+            text = "↻"
+            textSize = 22f
+            setTextColor(Color.WHITE)
+            setBackgroundColor(Color.argb(150, 0, 0, 0))
+            contentDescription = "Switch camera"
+            setOnClickListener { switchCameraInternal() }
+        }
         container.addView(preview, FrameLayout.LayoutParams(-1, -1))
         container.addView(guide, FrameLayout.LayoutParams(-1, -1))
+        container.addView(switchButton, FrameLayout.LayoutParams(
+            (52 * resources.displayMetrics.density).toInt(),
+            (52 * resources.displayMetrics.density).toInt(),
+            Gravity.TOP or Gravity.END
+        ).apply {
+            topMargin = (8 * resources.displayMetrics.density).toInt()
+            rightMargin = (8 * resources.displayMetrics.density).toInt()
+        })
         cameraOverlayContainer = container
         cameraPreviewView = preview
         cameraGuideOverlay = guide
+        cameraSwitchButton = switchButton
         return container
     }
 
@@ -558,6 +577,8 @@ class MainActivity : Activity(), LifecycleOwner {
         @JavascriptInterface
         fun startPreview(x: Float, y: Float, width: Float, height: Float) {
             runOnUiThread {
+                // 신분증 촬영은 태블릿 전면 카메라를 기본으로 연다.
+                cameraFacing = CameraSelector.LENS_FACING_FRONT
                 if (ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.CAMERA)
                     != PackageManager.PERMISSION_GRANTED
                 ) {
@@ -587,6 +608,26 @@ class MainActivity : Activity(), LifecycleOwner {
         fun capture() {
             runOnUiThread { captureDocumentPhotoInternal() }
         }
+
+        @JavascriptInterface
+        fun switchCamera() {
+            runOnUiThread { switchCameraInternal() }
+        }
+    }
+
+    private fun switchCameraInternal() {
+        cameraFacing = if (cameraFacing == CameraSelector.LENS_FACING_FRONT) {
+            CameraSelector.LENS_FACING_BACK
+        } else {
+            CameraSelector.LENS_FACING_FRONT
+        }
+        val container = cameraOverlayContainer ?: return
+        val lp = container.layoutParams as? FrameLayout.LayoutParams ?: return
+        val density = resources.displayMetrics.density
+        startCameraPreviewInternal(
+            lp.leftMargin / density, lp.topMargin / density,
+            lp.width / density, lp.height / density
+        )
     }
 
     // x/y/width/height는 페이지가 getBoundingClientRect()로 알려주는 CSS px다 — 뷰포트가
@@ -622,8 +663,10 @@ class MainActivity : Activity(), LifecycleOwner {
                 val captureUseCase = ImageCapture.Builder()
                     .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
                     .build()
-                val selector = if (provider.hasCamera(CameraSelector.DEFAULT_BACK_CAMERA))
+                val preferredSelector = CameraSelector.Builder().requireLensFacing(cameraFacing).build()
+                val fallbackSelector = if (cameraFacing == CameraSelector.LENS_FACING_FRONT)
                     CameraSelector.DEFAULT_BACK_CAMERA else CameraSelector.DEFAULT_FRONT_CAMERA
+                val selector = if (provider.hasCamera(preferredSelector)) preferredSelector else fallbackSelector
                 provider.bindToLifecycle(this, selector, previewUseCase, captureUseCase)
                 imageCapture = captureUseCase
                 notifyJsCameraEvent("preview_started", "")
