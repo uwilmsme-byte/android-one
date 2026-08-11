@@ -174,7 +174,14 @@ class MainActivity : Activity(), LifecycleOwner {
         root.addView(webView, FrameLayout.LayoutParams(-1, -1))
         root.addView(buildCameraOverlay(), FrameLayout.LayoutParams(0, 0))
         root.addView(errorView, FrameLayout.LayoutParams(-1, -1))
-        root.addView(buildCornerTrigger(), FrameLayout.LayoutParams(140, 140, Gravity.TOP or Gravity.END))
+        // 몰입 모드(SYSTEM_UI_FLAG_IMMERSIVE_STICKY)에서는 화면 맨 위 가장자리를 누르면
+        // 시스템이 "숨겨진 상태바 다시 보이기" 제스처로 먼저 가로채서, 트리거가 정확히
+        // 위쪽 가장자리에 붙어있으면 5초 누르기가 시작조차 안 될 수 있다(실제 겪은 문제:
+        // "5초간 누르면 된다는데 안 됨"). 위쪽 가장자리에서 살짝 띄우고 히트박스도 키운다.
+        root.addView(
+            buildCornerTrigger(),
+            FrameLayout.LayoutParams(260, 260, Gravity.TOP or Gravity.END).apply { topMargin = 160 }
+        )
         setContentView(root)
         if (needsPermissionSetup()) {
             startActivity(Intent(this, SettingsActivity::class.java))
@@ -279,7 +286,12 @@ class MainActivity : Activity(), LifecycleOwner {
             }
         }
         val preview = PreviewView(this).apply {
-            implementationMode = PreviewView.ImplementationMode.PERFORMANCE
+            // PERFORMANCE 모드는 SurfaceView로 렌더링되는데, SurfaceView는 별도
+            // 하드웨어 레이어로 합성되어 일부 기기(특히 이 안드로이드 원 태블릿)에서
+            // View.scaleX 같은 일반 View 트랜스폼이 화면에 반영되지 않는다 — 전면
+            // 카메라 좌우반전(scaleX=-1f)이 안 먹히던 실제 원인. COMPATIBLE 모드는
+            // TextureView로 렌더링되어 일반 View 트랜스폼 파이프라인을 그대로 탄다.
+            implementationMode = PreviewView.ImplementationMode.COMPATIBLE
             scaleType = PreviewView.ScaleType.FILL_CENTER
         }
         val guide = CameraGuideOverlayView(this)
