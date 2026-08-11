@@ -635,6 +635,10 @@ class MainActivity : Activity(), LifecycleOwner {
         val container = cameraOverlayContainer ?: return
         val preview = cameraPreviewView ?: return
         positionCameraOverlay(x, y, width, height)
+        // 이 영상은 WebView 위에 놓이는 네이티브 PreviewView라 웹 CSS 반전이 적용되지
+        // 않는다. 전면 카메라에서만 사용자에게 보이는 실시간 미리보기를 거울처럼
+        // 반전한다. ImageCapture 원본에는 영향을 주지 않는다.
+        preview.scaleX = if (cameraFacing == CameraSelector.LENS_FACING_FRONT) -1f else 1f
         container.visibility = View.VISIBLE
         val providerFuture = ProcessCameraProvider.getInstance(this)
         providerFuture.addListener({
@@ -654,7 +658,10 @@ class MainActivity : Activity(), LifecycleOwner {
                 val selector = if (provider.hasCamera(preferredSelector)) preferredSelector else fallbackSelector
                 provider.bindToLifecycle(this, selector, previewUseCase, captureUseCase)
                 imageCapture = captureUseCase
-                notifyJsCameraEvent("preview_started", "")
+                notifyJsCameraEvent(
+                    "preview_started",
+                    if (cameraFacing == CameraSelector.LENS_FACING_FRONT) "front" else "back"
+                )
             } catch (e: Exception) {
                 container.visibility = View.GONE
                 notifyJsCameraEvent("preview_error", e.message ?: "camera_bind_failed")
@@ -681,7 +688,14 @@ class MainActivity : Activity(), LifecycleOwner {
         capture.takePicture(ContextCompat.getMainExecutor(this), object : ImageCapture.OnImageCapturedCallback() {
             override fun onCaptureSuccess(image: ImageProxy) {
                 try {
-                    notifyJsCameraEvent("captured", imageProxyToJpegDataUrl(image))
+                    // 촬영 순간의 실제 선택 방향을 사진과 함께 넘긴다. WebView 쪽에서
+                    // 이전 preview 이벤트 상태에 의존하지 않고 환자용 미리보기를 확실히
+                    // 좌우반전할 수 있다.
+                    val payload = JSONObject().apply {
+                        put("image", imageProxyToJpegDataUrl(image))
+                        put("facing", if (cameraFacing == CameraSelector.LENS_FACING_FRONT) "front" else "back")
+                    }.toString()
+                    notifyJsCameraEvent("captured", payload)
                 } catch (e: Exception) {
                     notifyJsCameraEvent("capture_error", e.message ?: "encode_failed")
                 } finally {
