@@ -647,10 +647,10 @@ class MainActivity : Activity(), LifecycleOwner {
         val container = cameraOverlayContainer ?: return
         val preview = cameraPreviewView ?: return
         positionCameraOverlay(x, y, width, height)
-        // 이 영상은 WebView 위에 놓이는 네이티브 PreviewView라 웹 CSS 반전이 적용되지
-        // 않는다. 전면 카메라에서만 사용자에게 보이는 실시간 미리보기를 거울처럼
-        // 반전한다. ImageCapture 원본에는 영향을 주지 않는다.
-        preview.scaleX = if (cameraFacing == CameraSelector.LENS_FACING_FRONT) -1f else 1f
+        // 전면 카메라 라이브 프리뷰를 거울처럼 반전해봤지만, 반전된 화면으로는
+        // 오히려 실제 카메라 방향과 안 맞아 신분증에 맞추기 더 어렵다는 피드백으로
+        // 되돌렸다(preview.scaleX 반전 제거). 촬영 후 확인화면만 웹 쪽에서 반전한다.
+        preview.scaleX = 1f
         container.visibility = View.VISIBLE
         val providerFuture = ProcessCameraProvider.getInstance(this)
         providerFuture.addListener({
