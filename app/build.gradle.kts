@@ -11,8 +11,8 @@ android {
         applicationId = "com.seoulprime.huboneagent"
         minSdk = 29
         targetSdk = 35
-        versionCode = 4
-        versionName = "0.4.0-package-visibility-fix"
+        versionCode = 5
+        versionName = "0.5.0-native-camera-preview"
     }
 
     buildTypes {
@@ -32,4 +32,12 @@ dependencies {
     implementation("androidx.core:core-ktx:1.15.0")
     implementation("androidx.appcompat:appcompat:1.7.0")
     implementation("androidx.webkit:webkit:1.12.1")
+    // 신분증 촬영 화면(foreign_contact_intake.html)의 네이티브 카메라 미리보기 브릿지
+    // (HubOneCamera) — WebView가 http로 페이지를 열어 웹 getUserMedia()가 보안
+    // 컨텍스트 정책에 막히는 문제를 우회한다. RECORD_AUDIO의 HubOneAudio 브릿지와 동일한 이유.
+    implementation("androidx.camera:camera-core:1.3.4")
+    implementation("androidx.camera:camera-camera2:1.3.4")
+    implementation("androidx.camera:camera-lifecycle:1.3.4")
+    implementation("androidx.camera:camera-view:1.3.4")
+    implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")
 }

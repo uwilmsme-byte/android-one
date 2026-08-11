@@ -6,15 +6,24 @@ import android.app.Activity
 import android.app.AppOpsManager
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.Matrix
+import android.graphics.Paint
+import android.graphics.Path
+import android.graphics.RectF
 import android.media.MediaRecorder
 import android.net.Uri
 import android.os.Bundle
 import android.os.Process
 import android.provider.Settings
+import android.util.Base64
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
+import android.view.ViewOutlineProvider
 import android.view.WindowManager
 import android.webkit.CookieManager
 import android.webkit.JavascriptInterface
@@ -28,15 +37,31 @@ import android.widget.Button
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.TextView
+import androidx.camera.core.CameraSelector
+import androidx.camera.core.ImageCapture
+import androidx.camera.core.ImageCaptureException
+import androidx.camera.core.ImageProxy
+import androidx.camera.core.Preview
+import androidx.camera.lifecycle.ProcessCameraProvider
+import androidx.camera.view.PreviewView
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleOwner
+import androidx.lifecycle.LifecycleRegistry
 import org.json.JSONObject
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
 import java.util.Locale
 
-class MainActivity : Activity() {
+class MainActivity : Activity(), LifecycleOwner {
+    // CameraX가 미리보기/촬영 바인딩을 이 Activity의 실제 생명주기(onStart/onResume/
+    // onPause/onStop)에 맞춰 자동으로 시작·정지하도록 하기 위한 최소 LifecycleOwner
+    // 구현 — 이 Activity는 android.app.Activity라 androidx의 자동 디스패치가 없다.
+    private val lifecycleRegistry = LifecycleRegistry(this)
+    override val lifecycle: Lifecycle get() = lifecycleRegistry
     private lateinit var config: AgentConfig
     private lateinit var webView: WebView
     private lateinit var errorView: LinearLayout
@@ -56,6 +81,18 @@ class MainActivity : Activity() {
     private var nativeRecordingFile: File? = null
     private var pendingNativeAudioStart = false
 
+    // 신분증 촬영 화면(foreign_contact_intake.html)의 네이티브 카메라 미리보기 —
+    // 위 마이크와 동일한 이유(http 보안 컨텍스트)로 웹 getUserMedia(video)가 막히므로,
+    // CameraX 미리보기를 WebView 위에 페이지가 알려주는 위치·크기에 맞춰 겹쳐 그린다.
+    private var cameraProvider: ProcessCameraProvider? = null
+    private var imageCapture: ImageCapture? = null
+    private var cameraOverlayContainer: FrameLayout? = null
+    private var cameraPreviewView: PreviewView? = null
+    private var cameraGuideOverlay: CameraGuideOverlayView? = null
+    // CAMERA 런타임 권한을 아직 못 받은 상태에서 startPreview()가 호출된 경우, 승인
+    // 결과가 온 뒤 같은 위치로 다시 시작할 수 있도록 요청 당시의 rect를 잠깐 들고 있는다.
+    private var pendingCameraPreviewRect: FloatArray? = null
+
     // 상담원 화면(HUBONE deskchat)이 접수(/pt)·예약(/pt/reserve) 중 어느 화면을 보여줄지
     // 원격으로 지시하는 경로. 서버 재시작/앱 재시작과 무관하게 항상 접수 화면이 기본이다.
     private var currentScreenPath = SCREEN_PATH_CONTACT
@@ -63,6 +100,7 @@ class MainActivity : Activity() {
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_CREATE)
         requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
         enterImmersiveMode()
         config = AgentConfig.load(this)
@@ -77,6 +115,7 @@ class MainActivity : Activity() {
             CookieManager.getInstance().setAcceptCookie(true)
             CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
             addJavascriptInterface(AudioBridge(), "HubOneAudio")
+            addJavascriptInterface(CameraBridge(), "HubOneCamera")
             webViewClient = SafeWebViewClient()
             webChromeClient = object : WebChromeClient() {
                 override fun onShowFileChooser(
@@ -146,6 +185,7 @@ class MainActivity : Activity() {
         errorView = buildErrorView()
         val root = FrameLayout(this).apply { setBackgroundColor(Color.WHITE) }
         root.addView(webView, FrameLayout.LayoutParams(-1, -1))
+        root.addView(buildCameraOverlay(), FrameLayout.LayoutParams(0, 0))
         root.addView(errorView, FrameLayout.LayoutParams(-1, -1))
         root.addView(buildCornerTrigger(), FrameLayout.LayoutParams(140, 140, Gravity.TOP or Gravity.END))
         setContentView(root)
@@ -179,6 +219,11 @@ class MainActivity : Activity() {
         }
     }
 
+    override fun onStart() {
+        super.onStart()
+        lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_START)
+    }
+
     override fun onResume() {
         super.onResume()
         if (::webView.isInitialized) {
@@ -194,6 +239,26 @@ class MainActivity : Activity() {
                 loadConfiguredPage()
             }
         }
+        lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_RESUME)
+    }
+
+    // 아래 세 개는 카메라 미리보기용 LifecycleOwner 디스패치 전용이다 — CameraX가
+    // bindToLifecycle(this, ...)로 바인딩해두면 이 이벤트에 맞춰 프리뷰를 자동으로
+    // 정지·재개하므로, 페이지를 벗어나거나 앱이 백그라운드로 가도 카메라를 계속
+    // 붙잡고 있지 않는다(직접 unbindAll을 호출할 필요가 없다).
+    override fun onPause() {
+        super.onPause()
+        lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_PAUSE)
+    }
+
+    override fun onStop() {
+        super.onStop()
+        lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_STOP)
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_DESTROY)
     }
 
     private fun buildErrorView() = LinearLayout(this).apply {
@@ -209,6 +274,34 @@ class MainActivity : Activity() {
             text = "다시 시도"
             setOnClickListener { loadConfiguredPage() }
         })
+    }
+
+    // 신분증 촬영 화면의 .document-guide 컨테이너 자리에 정확히 겹쳐질 컨테이너 —
+    // 안에 CameraX PreviewView(실제 영상)와 CameraGuideOverlayView(어두운 반투명
+    // 배경 + 주황 테두리 가이드, 기존 웹 CSS ::after 가이드와 동일한 모양)를 쌓는다.
+    // 페이지가 준비될 때까지는 크기 0으로 숨겨둔다.
+    private fun buildCameraOverlay(): FrameLayout {
+        val container = FrameLayout(this).apply {
+            visibility = View.GONE
+            clipToOutline = true
+            outlineProvider = object : ViewOutlineProvider() {
+                override fun getOutline(view: View, outline: android.graphics.Outline) {
+                    val radius = 12f * resources.displayMetrics.density
+                    outline.setRoundRect(0, 0, view.width, view.height, radius)
+                }
+            }
+        }
+        val preview = PreviewView(this).apply {
+            implementationMode = PreviewView.ImplementationMode.PERFORMANCE
+            scaleType = PreviewView.ScaleType.FILL_CENTER
+        }
+        val guide = CameraGuideOverlayView(this)
+        container.addView(preview, FrameLayout.LayoutParams(-1, -1))
+        container.addView(guide, FrameLayout.LayoutParams(-1, -1))
+        cameraOverlayContainer = container
+        cameraPreviewView = preview
+        cameraGuideOverlay = guide
+        return container
     }
 
     private fun buildCornerTrigger() = View(this).apply {
@@ -352,6 +445,17 @@ class MainActivity : Activity() {
         grantResults: IntArray
     ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == CAMERA_PREVIEW_PERMISSION_REQUEST) {
+            val granted = grantResults.isNotEmpty() && grantResults.all { it == PackageManager.PERMISSION_GRANTED }
+            val rect = pendingCameraPreviewRect
+            pendingCameraPreviewRect = null
+            if (granted && rect != null) {
+                startCameraPreviewInternal(rect[0], rect[1], rect[2], rect[3])
+            } else if (!granted) {
+                notifyJsCameraEvent("preview_error", "permission_denied")
+            }
+            return
+        }
         if (requestCode != RECORD_AUDIO_PERMISSION_REQUEST) return
         val granted = grantResults.isNotEmpty() && grantResults.all { it == PackageManager.PERMISSION_GRANTED }
 
@@ -444,6 +548,184 @@ class MainActivity : Activity() {
         webView.evaluateJavascript(js, null)
     }
 
+    // 페이지(foreign_contact_intake.html)가 window.HubOneCamera로 호출하는 네이티브
+    // 카메라 미리보기 브릿지. startPreview(x, y, width, height)는 페이지 안의
+    // .document-guide 영역(CSS px, viewport 기준)을 알려주면 그 자리에 실시간 미리보기를
+    // 겹쳐 그리고, capture()로 촬영하면 JPEG를 base64 data URL로 콜백 전달한다.
+    // 결과는 window.__hubOneCameraEvent(status, payload) JS 콜백으로 비동기 통지한다
+    // (status: "preview_started"|"preview_error"|"captured"|"capture_error").
+    private inner class CameraBridge {
+        @JavascriptInterface
+        fun startPreview(x: Float, y: Float, width: Float, height: Float) {
+            runOnUiThread {
+                if (ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.CAMERA)
+                    != PackageManager.PERMISSION_GRANTED
+                ) {
+                    pendingCameraPreviewRect = floatArrayOf(x, y, width, height)
+                    ActivityCompat.requestPermissions(
+                        this@MainActivity,
+                        arrayOf(Manifest.permission.CAMERA),
+                        CAMERA_PREVIEW_PERMISSION_REQUEST
+                    )
+                    return@runOnUiThread
+                }
+                startCameraPreviewInternal(x, y, width, height)
+            }
+        }
+
+        @JavascriptInterface
+        fun updatePreviewRect(x: Float, y: Float, width: Float, height: Float) {
+            runOnUiThread { positionCameraOverlay(x, y, width, height) }
+        }
+
+        @JavascriptInterface
+        fun stopPreview() {
+            runOnUiThread { stopCameraPreviewInternal() }
+        }
+
+        @JavascriptInterface
+        fun capture() {
+            runOnUiThread { captureDocumentPhotoInternal() }
+        }
+    }
+
+    // x/y/width/height는 페이지가 getBoundingClientRect()로 알려주는 CSS px다 — 뷰포트가
+    // width=device-width, initial-scale=1(확대축소 없음)이므로 density를 곱하면 그대로
+    // 기기 픽셀 좌표가 된다.
+    private fun positionCameraOverlay(x: Float, y: Float, width: Float, height: Float) {
+        val container = cameraOverlayContainer ?: return
+        val density = resources.displayMetrics.density
+        val lp = (container.layoutParams as? FrameLayout.LayoutParams) ?: FrameLayout.LayoutParams(0, 0)
+        lp.width = (width * density).toInt().coerceAtLeast(1)
+        lp.height = (height * density).toInt().coerceAtLeast(1)
+        lp.leftMargin = (x * density).toInt()
+        lp.topMargin = (y * density).toInt()
+        lp.gravity = Gravity.TOP or Gravity.START
+        container.layoutParams = lp
+        cameraGuideOverlay?.invalidate()
+    }
+
+    private fun startCameraPreviewInternal(x: Float, y: Float, width: Float, height: Float) {
+        val container = cameraOverlayContainer ?: return
+        val preview = cameraPreviewView ?: return
+        positionCameraOverlay(x, y, width, height)
+        container.visibility = View.VISIBLE
+        val providerFuture = ProcessCameraProvider.getInstance(this)
+        providerFuture.addListener({
+            try {
+                val provider = providerFuture.get()
+                cameraProvider = provider
+                provider.unbindAll()
+                val previewUseCase = Preview.Builder().build().also {
+                    it.setSurfaceProvider(preview.surfaceProvider)
+                }
+                val captureUseCase = ImageCapture.Builder()
+                    .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
+                    .build()
+                val selector = if (provider.hasCamera(CameraSelector.DEFAULT_BACK_CAMERA))
+                    CameraSelector.DEFAULT_BACK_CAMERA else CameraSelector.DEFAULT_FRONT_CAMERA
+                provider.bindToLifecycle(this, selector, previewUseCase, captureUseCase)
+                imageCapture = captureUseCase
+                notifyJsCameraEvent("preview_started", "")
+            } catch (e: Exception) {
+                container.visibility = View.GONE
+                notifyJsCameraEvent("preview_error", e.message ?: "camera_bind_failed")
+            }
+        }, ContextCompat.getMainExecutor(this))
+    }
+
+    private fun stopCameraPreviewInternal() {
+        try {
+            cameraProvider?.unbindAll()
+        } catch (_: Exception) {
+            // no-op — 이미 unbind된 상태 등은 무시해도 안전하다.
+        }
+        imageCapture = null
+        cameraOverlayContainer?.visibility = View.GONE
+    }
+
+    private fun captureDocumentPhotoInternal() {
+        val capture = imageCapture
+        if (capture == null) {
+            notifyJsCameraEvent("capture_error", "not_started")
+            return
+        }
+        capture.takePicture(ContextCompat.getMainExecutor(this), object : ImageCapture.OnImageCapturedCallback() {
+            override fun onCaptureSuccess(image: ImageProxy) {
+                try {
+                    notifyJsCameraEvent("captured", imageProxyToJpegDataUrl(image))
+                } catch (e: Exception) {
+                    notifyJsCameraEvent("capture_error", e.message ?: "encode_failed")
+                } finally {
+                    image.close()
+                }
+            }
+
+            override fun onError(exception: ImageCaptureException) {
+                notifyJsCameraEvent("capture_error", exception.message ?: "capture_failed")
+            }
+        })
+    }
+
+    // ImageCapture 기본 출력은 JPEG이므로 planes[0]을 그대로 디코딩하면 된다. 센서
+    // 방향(rotationDegrees)만큼 회전시키고, 업로드 크기를 페이지 쪽 기존 웹 캡처
+    // 경로(_takeDocumentPhoto의 canvas maxWidth)와 맞춰 1600px로 다운스케일한다.
+    private fun imageProxyToJpegDataUrl(image: ImageProxy): String {
+        val buffer = image.planes[0].buffer
+        val bytes = ByteArray(buffer.remaining())
+        buffer.get(bytes)
+        var bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+            ?: throw IllegalStateException("decode_failed")
+        val rotation = image.imageInfo.rotationDegrees
+        if (rotation != 0) {
+            val matrix = Matrix().apply { postRotate(rotation.toFloat()) }
+            bitmap = Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
+        }
+        val maxWidth = 1600
+        if (bitmap.width > maxWidth) {
+            val scale = maxWidth.toFloat() / bitmap.width
+            bitmap = Bitmap.createScaledBitmap(bitmap, maxWidth, (bitmap.height * scale).toInt().coerceAtLeast(1), true)
+        }
+        val out = ByteArrayOutputStream()
+        bitmap.compress(Bitmap.CompressFormat.JPEG, 88, out)
+        val base64 = Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP)
+        return "data:image/jpeg;base64,$base64"
+    }
+
+    private fun notifyJsCameraEvent(status: String, payload: String) {
+        val js = "window.__hubOneCameraEvent && window.__hubOneCameraEvent(${JSONObject.quote(status)}, ${JSONObject.quote(payload)});"
+        webView.evaluateJavascript(js, null)
+    }
+
+    // .document-guide와 동일한 가이드 모양(어두운 반투명 배경 + 12%/7% inset의 주황
+    // 테두리)을 네이티브로 그린다 — 기존 웹 CSS(.document-guide::after)의 값을 그대로
+    // 옮겨왔다. 네이티브 프리뷰가 WebView 위에 얹히면서 그 CSS는 가려지므로 대신 이걸 쓴다.
+    private class CameraGuideOverlayView(context: android.content.Context) : View(context) {
+        private val density = context.resources.displayMetrics.density
+        private val borderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.STROKE
+            color = Color.parseColor("#ff9800")
+            strokeWidth = 3f * density
+        }
+        private val scrimPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.argb((0.22f * 255).toInt(), 0, 0, 0)
+        }
+
+        override fun onDraw(canvas: Canvas) {
+            super.onDraw(canvas)
+            if (width <= 0 || height <= 0) return
+            val insetX = width * 0.07f
+            val insetY = height * 0.12f
+            val holeRect = RectF(insetX, insetY, width - insetX, height - insetY)
+            val radius = 12f * density
+            val full = Path().apply { addRect(0f, 0f, width.toFloat(), height.toFloat(), Path.Direction.CW) }
+            val hole = Path().apply { addRoundRect(holeRect, radius, radius, Path.Direction.CW) }
+            full.op(hole, Path.Op.DIFFERENCE)
+            canvas.drawPath(full, scrimPaint)
+            canvas.drawRoundRect(holeRect, radius, radius, borderPaint)
+        }
+    }
+
     // 세션 API에 직접 멀티파트 업로드한다 — deskchat/api/foreign_reservation.py의
     // POST .../voice/transcribe와 동일한 필드(audio, language)를 그대로 맞춘다.
     private fun uploadVoiceFile(sessionId: String, language: String, file: File): Pair<Boolean, String> {
@@ -508,6 +790,7 @@ class MainActivity : Activity() {
         private const val SCREEN_PATH_CONTACT = "/pt"
         private const val SCREEN_PATH_RESERVATION = "/pt/reserve"
         private const val RECORD_AUDIO_PERMISSION_REQUEST = 20
+        private const val CAMERA_PREVIEW_PERMISSION_REQUEST = 21
 
         // CommandPollService가 MainActivity를 강제로 앞에 가져올 때(덴트웹 등에서 복귀)
         // 어느 화면을 띄울지 실어 보내는 Intent extra 키 — CommandPollState.SCREEN_CONTACT/
