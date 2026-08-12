@@ -675,15 +675,20 @@ class MainActivity : Activity(), LifecycleOwner {
                 val selector = if (provider.hasCamera(preferredSelector)) preferredSelector else fallbackSelector
                 val camera: Camera = provider.bindToLifecycle(this, selector, previewUseCase, captureUseCase)
                 imageCapture = captureUseCase
-                // 신분증 전체를 안내선 안에 채우려면 카메라를 너무 가까이 대야 해서 초점이
-                // 안 맞는 문제가 실제로 있었다 — 프리뷰를 2배 줌해서 같은 화면 채움 정도를
-                // 유지하면서 카메라와의 거리는 초점이 맞는 범위로 더 벌릴 수 있게 한다.
-                // 기기가 지원하는 최대 줌보다 크게 요청하면 조용히 실패하므로 상한을 맞춘다.
-                try {
-                    val maxZoom = camera.cameraInfo.zoomState.value?.maxZoomRatio ?: 1f
-                    if (maxZoom > 1f) camera.cameraControl.setZoomRatio(minOf(2f, maxZoom))
-                } catch (_: Exception) {
-                    // 줌 미지원 기기 — 촬영 자체는 그대로 진행한다.
+                // 전면 카메라는 신분증 전체를 안내선 안에 채우려면 너무 가까이 대야 해서
+                // 초점이 안 맞는 문제가 실제로 있었다 — 프리뷰를 2배 줌해서 같은 화면 채움
+                // 정도를 유지하면서 카메라와의 거리는 초점이 맞는 범위로 더 벌릴 수 있게
+                // 한다. 후면 카메라는 이미 초점 거리가 넉넉해 이 문제가 없고, 오히려 화각이
+                // 좁아져 안내선 안에 다 못 담는 문제가 생기므로 1배(줌 없음)를 유지한다
+                // (실제 지적 사항). 기기가 지원하는 최대 줌보다 크게 요청하면 조용히
+                // 실패하므로 상한을 맞춘다.
+                if (cameraFacing == CameraSelector.LENS_FACING_FRONT) {
+                    try {
+                        val maxZoom = camera.cameraInfo.zoomState.value?.maxZoomRatio ?: 1f
+                        if (maxZoom > 1f) camera.cameraControl.setZoomRatio(minOf(2f, maxZoom))
+                    } catch (_: Exception) {
+                        // 줌 미지원 기기 — 촬영 자체는 그대로 진행한다.
+                    }
                 }
                 notifyJsCameraEvent(
                     "preview_started",
