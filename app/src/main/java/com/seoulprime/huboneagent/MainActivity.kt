@@ -17,6 +17,8 @@ import android.graphics.RectF
 import android.media.MediaRecorder
 import android.net.Uri
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.os.Process
 import android.provider.Settings
 import android.util.Base64
@@ -117,6 +119,7 @@ class MainActivity : Activity(), LifecycleOwner {
             CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
             addJavascriptInterface(AudioBridge(), "HubOneAudio")
             addJavascriptInterface(CameraBridge(), "HubOneCamera")
+            addJavascriptInterface(NavBridge(), "HubOneNav")
             webViewClient = SafeWebViewClient()
             webChromeClient = object : WebChromeClient() {
                 override fun onShowFileChooser(
@@ -519,12 +522,14 @@ class MainActivity : Activity(), LifecycleOwner {
         // 이 세 번째 인자를 명시적으로 넘긴다.
         @JavascriptInterface
         fun stopAndUpload(sessionId: String, language: String, mode: String) {
+            android.util.Log.d("HubOneVoice", "stopAndUpload called sessionId=$sessionId mode=$mode")
             runOnUiThread {
                 val recorder = nativeMediaRecorder
                 val file = nativeRecordingFile
                 nativeMediaRecorder = null
                 nativeRecordingFile = null
                 if (recorder == null || file == null) {
+                    android.util.Log.w("HubOneVoice", "stopAndUpload: not_recording (recorder or file null)")
                     notifyJsAudioEvent("upload_error", "not_recording")
                     return@runOnUiThread
                 }
@@ -532,16 +537,56 @@ class MainActivity : Activity(), LifecycleOwner {
                     recorder.stop()
                     recorder.release()
                 } catch (e: Exception) {
+                    android.util.Log.e("HubOneVoice", "recorder.stop() failed: ${e.message}", e)
                     notifyJsAudioEvent("upload_error", e.message ?: "stop_failed")
                     return@runOnUiThread
                 }
+                android.util.Log.d("HubOneVoice", "recorder stopped, file=${file.absolutePath} size=${file.length()} — starting upload thread")
                 Thread {
                     val (ok, message) = uploadVoiceFile(sessionId, language, file, mode)
+                    android.util.Log.d("HubOneVoice", "upload thread finished ok=$ok message=$message")
                     file.delete()
                     runOnUiThread { notifyJsAudioEvent(if (ok) "uploaded" else "upload_error", message) }
                 }.start()
             }
         }
+    }
+
+    // 페이지(foreign_contact_intake.html의 "내국인이신가요?" 버튼)가 window.HubOneNav로
+    // 호출하는 네이티브 브릿지 — 태블릿 자체를 덴트웹 고객용 앱으로 전환한다.
+    // CommandPollService.launchDentWeb()(서버가 미는 return_to_dentweb 명령용)과 로직은
+    // 같지만, 이쪽은 환자가 웹뷰에서 직접 누른 즉시 반응이라 서버 왕복이 필요 없다.
+    private inner class NavBridge {
+        @JavascriptInterface
+        fun launchDentWeb() {
+            runOnUiThread {
+                val pkg = config.dentwebPackage.trim()
+                if (pkg.isBlank()) {
+                    notifyJsNavEvent("error", "덴트웹 앱 패키지명이 설정되지 않았습니다.")
+                    return@runOnUiThread
+                }
+                val intent = try {
+                    packageManager.getLaunchIntentForPackage(pkg)
+                } catch (_: Exception) { null }
+                if (intent == null) {
+                    notifyJsNavEvent("error", "덴트웹 앱을 찾을 수 없습니다: $pkg")
+                    return@runOnUiThread
+                }
+                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
+                try {
+                    startActivity(intent)
+                    CommandPollState.currentScreen = CommandPollState.SCREEN_DENTWEB
+                    notifyJsNavEvent("launched", "")
+                } catch (e: Exception) {
+                    notifyJsNavEvent("error", "덴트웹 앱 실행 실패: ${e.javaClass.simpleName}: ${e.message ?: "unknown"}")
+                }
+            }
+        }
+    }
+
+    private fun notifyJsNavEvent(status: String, message: String) {
+        val js = "window.__hubOneNavEvent && window.__hubOneNavEvent(${JSONObject.quote(status)}, ${JSONObject.quote(message)});"
+        webView.evaluateJavascript(js, null)
     }
 
     private fun startNativeRecordingInternal() {
@@ -805,7 +850,23 @@ class MainActivity : Activity(), LifecycleOwner {
     // mode="reservation"이면 sessionIdOrScreenId는 예약 세션 URL 경로(/pt/reserve 기존
     // 동작), mode="contact"이면 접수 태블릿 화면(screen_id) form 필드로 보낸다(/pt 신규).
     private fun uploadVoiceFile(sessionIdOrScreenId: String, language: String, file: File, mode: String): Pair<Boolean, String> {
+        var conn: HttpURLConnection? = null
+        // HttpURLConnection의 connectTimeout/readTimeout은 연결 수립과 응답 대기만
+        // 커버하고, 업로드(쓰기) 구간 자체가 멈추는 경우는 막아주지 않는다 — 실제 겪은
+        // 문제: 마이크 녹음 종료 후 "상담원에게 전달 중..."에서 화면이 영원히 멈춤
+        // (네트워크가 뚝 끊기지 않고 그냥 정체되면 write()가 무한 대기할 수 있음).
+        // 별도 워치독으로 일정 시간 뒤 연결을 강제로 끊어 예외를 발생시켜서 항상
+        // uploaded/upload_error 콜백이 나가도록 한다.
+        val watchdogHandler = Handler(Looper.getMainLooper())
+        val watchdog = Runnable {
+            android.util.Log.w("HubOneVoice", "upload watchdog fired — forcing disconnect")
+            try { conn?.disconnect() } catch (_: Exception) { /* 무시 */ }
+        }
         return try {
+            // URL 생성(base가 비어있거나 형식이 잘못됐으면 MalformedURLException)도 반드시
+            // 이 try 안에서 해야 한다 — 밖에서 하면 예외가 이 함수를 통째로 빠져나가
+            // 호출부(Thread{}.start())에서 안 잡히고 콜백이 영영 안 나가는 채로 스레드가
+            // 조용히 죽는다(실제 있었던 회귀 — watchdog 추가하면서 실수로 밖으로 뺐었음).
             val boundary = "----HubOneBoundary${System.currentTimeMillis()}"
             val base = config.baseUrl.trim().trimEnd('/')
             val isContact = mode == "contact"
@@ -813,13 +874,15 @@ class MainActivity : Activity(), LifecycleOwner {
                 URL("$base/api/patients/foreign-intake/voice/transcribe")
             else
                 URL("$base/api/patients/foreign-reservation/session/${Uri.encode(sessionIdOrScreenId)}/voice/transcribe")
-            val conn = (url.openConnection() as HttpURLConnection).apply {
+            android.util.Log.d("HubOneVoice", "upload starting url=$url fileSize=${file.length()}")
+            conn = (url.openConnection() as HttpURLConnection).apply {
                 requestMethod = "POST"
                 doOutput = true
                 connectTimeout = 5_000
                 readTimeout = 60_000
                 setRequestProperty("Content-Type", "multipart/form-data; boundary=$boundary")
             }
+            watchdogHandler.postDelayed(watchdog, UPLOAD_WATCHDOG_MS)
             conn.outputStream.use { out ->
                 fun writeText(s: String) = out.write(s.toByteArray(Charsets.UTF_8))
                 fun writeField(name: String, value: String) {
@@ -837,10 +900,14 @@ class MainActivity : Activity(), LifecycleOwner {
                 out.flush()
             }
             val code = conn.responseCode
-            conn.disconnect()
+            android.util.Log.d("HubOneVoice", "upload response code=$code")
             if (code in 200..299) Pair(true, "") else Pair(false, "http_$code")
         } catch (e: Exception) {
+            android.util.Log.e("HubOneVoice", "upload failed: ${e.javaClass.simpleName}: ${e.message}", e)
             Pair(false, e.message ?: "upload_exception")
+        } finally {
+            watchdogHandler.removeCallbacks(watchdog)
+            try { conn?.disconnect() } catch (_: Exception) { /* 무시 */ }
         }
     }
 
@@ -875,6 +942,10 @@ class MainActivity : Activity(), LifecycleOwner {
         private const val SCREEN_PATH_RESERVATION = "/pt/reserve"
         private const val RECORD_AUDIO_PERMISSION_REQUEST = 20
         private const val CAMERA_PREVIEW_PERMISSION_REQUEST = 21
+        // 음성 업로드 워치독 — connectTimeout/readTimeout이 커버 못 하는 "쓰기 중 정체"
+        // 상황에서도 이 시간 안에는 반드시 강제로 끊어서 uploaded/upload_error 콜백이
+        // 나가도록 한다(실제 겪은 문제: "상담원에게 전달 중..."에서 무한 대기).
+        private const val UPLOAD_WATCHDOG_MS = 45_000L
 
         // CommandPollService가 MainActivity를 강제로 앞에 가져올 때(덴트웹 등에서 복귀)
         // 어느 화면을 띄울지 실어 보내는 Intent extra 키 — CommandPollState.SCREEN_CONTACT/

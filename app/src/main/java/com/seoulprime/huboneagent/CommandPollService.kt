@@ -57,8 +57,13 @@ class CommandPollService : Service() {
     // 띄워둬서 이 예외 조건을 만족시킨다.
     private var overlayView: View? = null
 
+    // 덴트웹 고객용 앱이 전면일 때도 대기 광고 슬라이드쇼를 보여주는 네이티브 오버레이
+    // — 실제 요청 사항: "덴트웹 화면에서도 같이 동작하기를 원함" (AdOverlayManager 참고).
+    private lateinit var adOverlayManager: AdOverlayManager
+
     override fun onCreate() {
         super.onCreate()
+        adOverlayManager = AdOverlayManager(this)
         startForeground(NOTIFICATION_ID, buildNotification())
         ensureOverlayKeepAlive()
         startPolling()
@@ -75,6 +80,7 @@ class CommandPollService : Service() {
     override fun onDestroy() {
         pollRunnable?.let { handler.removeCallbacks(it) }
         removeOverlayKeepAlive()
+        adOverlayManager.teardown()
         super.onDestroy()
     }
 
@@ -161,6 +167,9 @@ class CommandPollService : Service() {
         if (externalDentweb) {
             CommandPollState.currentScreen = CommandPollState.SCREEN_DENTWEB
         }
+        // 덴트웹이 전면일 때도 대기 광고 슬라이드쇼가 보이도록 — 웹뷰(/pt)가 전면일 때는
+        // JS 쪽(tablet_idle_overlay.js)이 이미 처리하므로 이 매니저는 손을 뗀다.
+        adOverlayManager.onPollTick(screen, base, externalDentweb)
         val currentScreen = CommandPollState.currentScreen
         val focused = !externalDentweb && CommandPollState.windowFocused
         val statusMessage = if (detected == null) "전면 앱 확인 권한이 없어 덴트웹 앱 상태를 추정치로만 보고합니다."

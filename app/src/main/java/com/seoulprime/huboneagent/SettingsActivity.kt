@@ -241,9 +241,13 @@ class SettingsActivity : Activity() {
                 connection.readTimeout = 5_000
                 val code = connection.responseCode
                 connection.disconnect()
-                "연결 응답: HTTP $code"
+                if (code in 200..299) {
+                    "서버 연결이 정상입니다."
+                } else {
+                    "서버에 연결하지 못했습니다. (응답 코드: $code)"
+                }
             } catch (_: Exception) {
-                "서버에 연결할 수 없습니다"
+                "서버에 연결할 수 없습니다. 주소와 네트워크를 확인해 주세요."
             }
             runOnUiThread { Toast.makeText(this, result, Toast.LENGTH_LONG).show() }
         }.start()
