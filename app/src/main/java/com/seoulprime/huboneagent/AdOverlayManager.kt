@@ -174,12 +174,17 @@ class AdOverlayManager(private val context: Context) {
                 WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
                 PixelFormat.OPAQUE
             )
-            // 터치하면 광고만 걷히고 그 뒤의 덴트웹 화면이 다시 보이는 게 아니라,
-            // 우리 웹뷰(/pt 접수 화면)로 전환한다 — 실제 요청 사항: "광고에서
-            // 터치하면 /pt로 돌아감". 광고는 두 접수 경로(웹뷰/덴트웹) 중 어느 쪽이
-            // 떠 있었든 공통으로 뜨는 "쉬고 있는 상태"라서, 터치 = "접수 시작"은
-            // 항상 같은 입구(/pt)로 보내는 게 자연스럽다.
-            iv.setOnClickListener { dismissAdAndGoToContact() }
+            // 화면을 좌/우로 나눠서 오른쪽을 누르면 /pt(외국인 접수) 웹뷰로 전환하고,
+            // 왼쪽을 누르면 광고만 걷고 원래 떠 있던 덴트웹 화면으로 돌아간다 — 실제
+            // 요청 사항. OnClickListener는 터치 좌표를 안 주므로 OnTouchListener로
+            // ACTION_DOWN에서 바로 판정한다(빠른 반응, 드래그/스와이프 구분 불필요).
+            iv.setOnTouchListener { v, event ->
+                if (event.action == MotionEvent.ACTION_DOWN) {
+                    val isRightHalf = event.x >= v.width / 2f
+                    if (isRightHalf) dismissAdAndGoToContact() else dismissAdStayOnDentweb()
+                }
+                true
+            }
             wm.addView(iv, params)
             adOverlayView = iv
         } catch (_: Exception) {
@@ -239,6 +244,13 @@ class AdOverlayManager(private val context: Context) {
         armed = false
         cancelIdleTimer()
         navigateToContact()
+    }
+
+    // 광고 왼쪽 터치 — 이미 덴트웹이 광고 뒤에 그대로 떠 있으므로 걷어내기만 하면
+    // 된다(전환 불필요). 무조작 상태가 계속되면 다시 idle 카운트를 새로 건다.
+    private fun dismissAdStayOnDentweb() {
+        hideAdOverlay()
+        if (armed) resetIdleTimer()
     }
 
     private fun navigateToContact() {
