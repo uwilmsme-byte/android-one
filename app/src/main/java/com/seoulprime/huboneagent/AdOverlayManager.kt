@@ -1,6 +1,7 @@
 package com.seoulprime.huboneagent
 
 import android.content.Context
+import android.content.Intent
 import android.graphics.BitmapFactory
 import android.graphics.Color
 import android.graphics.PixelFormat
@@ -107,8 +108,14 @@ class AdOverlayManager(private val context: Context) {
             view.alpha = 0f
             view.setOnTouchListener { _, event ->
                 if (event.action == MotionEvent.ACTION_OUTSIDE) {
-                    if (armed) resetIdleTimer()
-                    if (adOverlayView != null) hideAdOverlay()
+                    if (adOverlayView != null) {
+                        // 정상적으로는 광고 창 자체의 클릭 리스너가 먼저 받아가지만
+                        // (전체화면을 덮고 있어 더 위에 뜸), 기기/OEM에 따라 바깥터치
+                        // 감시 창이 대신 받는 경우를 대비한 동일 동작 백업.
+                        dismissAdAndGoToContact()
+                    } else if (armed) {
+                        resetIdleTimer()
+                    }
                 }
                 false
             }
@@ -167,10 +174,12 @@ class AdOverlayManager(private val context: Context) {
                 WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
                 PixelFormat.OPAQUE
             )
-            iv.setOnClickListener {
-                hideAdOverlay()
-                if (armed) resetIdleTimer()
-            }
+            // 터치하면 광고만 걷히고 그 뒤의 덴트웹 화면이 다시 보이는 게 아니라,
+            // 우리 웹뷰(/pt 접수 화면)로 전환한다 — 실제 요청 사항: "광고에서
+            // 터치하면 /pt로 돌아감". 광고는 두 접수 경로(웹뷰/덴트웹) 중 어느 쪽이
+            // 떠 있었든 공통으로 뜨는 "쉬고 있는 상태"라서, 터치 = "접수 시작"은
+            // 항상 같은 입구(/pt)로 보내는 게 자연스럽다.
+            iv.setOnClickListener { dismissAdAndGoToContact() }
             wm.addView(iv, params)
             adOverlayView = iv
         } catch (_: Exception) {
@@ -221,6 +230,31 @@ class AdOverlayManager(private val context: Context) {
         val iv = adOverlayView ?: return
         adOverlayView = null
         try { windowManager?.removeView(iv) } catch (_: Exception) { /* 무시 */ }
+    }
+
+    // 광고를 걷고 웹뷰(/pt 접수 화면)를 앞으로 가져온다 — CommandPollService의
+    // "open_contact" 명령 처리(bringMainActivityToFront)와 같은 방식.
+    private fun dismissAdAndGoToContact() {
+        hideAdOverlay()
+        armed = false
+        cancelIdleTimer()
+        navigateToContact()
+    }
+
+    private fun navigateToContact() {
+        val intent = Intent(context, MainActivity::class.java).apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
+            putExtra(MainActivity.EXTRA_SCREEN_COMMAND, CommandPollState.SCREEN_CONTACT)
+        }
+        try {
+            context.startActivity(intent)
+            CommandPollState.currentScreen = CommandPollState.SCREEN_CONTACT
+        } catch (_: Exception) {
+            // 안드로이드 10+ 백그라운드 활동 시작 제한에 걸릴 수 있다 — 이 서비스는
+            // 항상 오버레이 창(overlayView)을 하나 띄워두고 있어("보이는 창이 있음"
+            // 예외 조건) 대개는 통과하지만, 실패해도 다음 무조작 idle 주기가 지나면
+            // 광고가 다시 뜨면서 재시도되는 셈이라 별도 재시도 로직을 두지 않는다.
+        }
     }
 
     private class Config(
