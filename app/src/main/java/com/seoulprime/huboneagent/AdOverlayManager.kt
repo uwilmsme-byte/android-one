@@ -56,6 +56,9 @@ class AdOverlayManager(private val context: Context) {
     // 켜졌을 때는 기본값(IDLE_MS)을 쓰고, 매번 showAdOverlay()에서 새로 받아온
     // 값으로 다음 주기부터 갱신한다(웹 버전 tablet_idle_overlay.js와 동일한 절충).
     private var cachedIdleMs: Long = IDLE_MS
+    // 광고 좌/우 분리 터치 — 데스크 "Kiosk 설정"에서 켜고 끌 수 있음(ad_touch_split).
+    // 끄면 어디를 눌러도 dismissAdAndGoToContact()만 실행(예전 동작).
+    private var touchSplitEnabled: Boolean = true
 
     private var configScreenId: String = ""
     private var configBaseUrl: String = ""
@@ -148,6 +151,7 @@ class AdOverlayManager(private val context: Context) {
                 if (!armed) return@post // 그 사이 덴트웹에서 벗어났으면 취소
                 if (cfg == null) return@post
                 cachedIdleMs = cfg.idleMs // 다음 idle 대기부터 갱신된 값을 쓴다.
+                touchSplitEnabled = cfg.touchSplit
                 if (!cfg.enabled || cfg.slideUrls.isEmpty()) return@post
                 slideUrls = cfg.slideUrls
                 slideIntervalMs = cfg.slideIntervalMs
@@ -180,8 +184,12 @@ class AdOverlayManager(private val context: Context) {
             // ACTION_DOWN에서 바로 판정한다(빠른 반응, 드래그/스와이프 구분 불필요).
             iv.setOnTouchListener { v, event ->
                 if (event.action == MotionEvent.ACTION_DOWN) {
-                    val isRightHalf = event.x >= v.width / 2f
-                    if (isRightHalf) dismissAdAndGoToContact() else dismissAdStayOnDentweb()
+                    if (!touchSplitEnabled) {
+                        dismissAdAndGoToContact()
+                    } else {
+                        val isRightHalf = event.x >= v.width / 2f
+                        if (isRightHalf) dismissAdAndGoToContact() else dismissAdStayOnDentweb()
+                    }
                 }
                 true
             }
@@ -274,6 +282,7 @@ class AdOverlayManager(private val context: Context) {
         val slideUrls: List<String>,
         val slideIntervalMs: Long,
         val idleMs: Long,
+        val touchSplit: Boolean,
     )
 
     // 일반 슬라이드를 정해진 순서대로 돌리다가, guideInterval장마다 안내사진을
@@ -302,6 +311,7 @@ class AdOverlayManager(private val context: Context) {
             val guideInterval = json.optInt("guide_interval", 3)
             val slideIntervalMs = json.optLong("slide_interval_ms", 6_000L)
             val idleMs = json.optLong("idle_ms", IDLE_MS)
+            val touchSplit = json.optBoolean("ad_touch_split", true)
             val slidesKey = if (busyMode) "busy_slides" else "slides"
             val arr = json.optJSONArray(slidesKey) ?: JSONArray()
             val fileIds = mutableListOf<String>()
@@ -319,7 +329,7 @@ class AdOverlayManager(private val context: Context) {
             }
 
             val urls = ordered.map { "$base/api/files/tablet-ad/${Uri.encode(it)}/preview" }
-            Config(enabled, urls, slideIntervalMs.coerceIn(1_000L, 60_000L), idleMs.coerceIn(3_000L, 300_000L))
+            Config(enabled, urls, slideIntervalMs.coerceIn(1_000L, 60_000L), idleMs.coerceIn(3_000L, 300_000L), touchSplit)
         } catch (_: Exception) {
             null
         }
