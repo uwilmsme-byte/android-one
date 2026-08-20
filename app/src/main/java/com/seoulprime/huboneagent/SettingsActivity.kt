@@ -174,19 +174,18 @@ class SettingsActivity : Activity() {
                 marginEnd = if (row.childCount > 0) 12 else 0
             })
         }
+        // 실제 요청 사항: "연결테스트 등 버튼 3컬럼 배열해도 됨" — 2열 3행 대신 3열 2행으로.
         val rowLayoutParams = { LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT) }
         val row1 = buttonRow()
         addButton(row1, "연결 테스트") { testConnection() }
         addButton(row1, "자동 검색") { discoverServer() }
+        addButton(row1, "현재 URL 열기") { save(); openMain() }
         buttonsGrid.addView(row1, rowLayoutParams())
         val row2 = buttonRow()
-        addButton(row2, "현재 URL 열기") { save(); openMain() }
         addButton(row2, "앱 재시작") { save(); openMain() }
+        addButton(row2, "기본값 복원") { restoreDefaults() }
+        addButton(row2, "저장") { save(); finish() }
         buttonsGrid.addView(row2, rowLayoutParams())
-        val row3 = buttonRow()
-        addButton(row3, "기본값 복원") { restoreDefaults() }
-        addButton(row3, "저장") { save(); finish() }
-        buttonsGrid.addView(row3, rowLayoutParams())
         root.addView(buttonsGrid, rowLayoutParams())
         // 오늘 하루에도 버튼/설명이 계속 늘어서(카메라·마이크·전면앱확인·화면위표시·절전명령
         // 5개 권한 버튼 + 6개 동작 버튼) 세로 길이가 화면을 넘어설 수 있다 — ScrollView로
