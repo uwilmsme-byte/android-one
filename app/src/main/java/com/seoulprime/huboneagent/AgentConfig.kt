@@ -1,6 +1,10 @@
 package com.seoulprime.huboneagent
 
 import android.content.Context
+import android.os.Environment
+import android.util.Log
+import java.io.File
+import java.util.Properties
 
 data class AgentConfig(
     val baseUrl: String = DEFAULT_BASE_URL,
@@ -34,13 +38,49 @@ data class AgentConfig(
             .putBoolean("manualBaseUrl", manualBaseUrl)
             .putBoolean("manualBaseUrlVerified", manualBaseUrlVerified)
             .apply()
+        saveDurableBackup()
+    }
+
+    // SharedPreferences는 앱 전용 저장소라 재설치(특히 "데이터 지우고 설치" 방식)하면
+    // 통째로 날아간다 — 실제 겪은 문제: "재빌드/재설치할 때마다 태블릿 이름(screen_id)을
+    // 매번 다시 설정해야 함". 앱 삭제와 무관하게 남아있는 공용 외부 저장소에도 같은 값을
+    // 텍스트 파일로 백업해두고, load()에서 SharedPreferences가 비어있으면(새로 설치된
+    // 직후) 이 파일에서 복구한다. "폴더 접근" 권한(MANAGE_EXTERNAL_STORAGE)이 없으면
+    // 조용히 건너뛴다 — 이 백업은 있으면 좋은 보조 수단이지 필수 기능이 아니다.
+    private fun saveDurableBackup() {
+        try {
+            val dir = File(Environment.getExternalStorageDirectory(), "HubOneAgent")
+            if (!dir.exists() && !dir.mkdirs()) return
+            val props = Properties().apply {
+                setProperty("baseUrl", baseUrl)
+                setProperty("screenId", screenId)
+                setProperty("dentwebPackage", dentwebPackage)
+                setProperty("manualBaseUrl", manualBaseUrl.toString())
+                setProperty("manualBaseUrlVerified", manualBaseUrlVerified.toString())
+            }
+            File(dir, BACKUP_FILE_NAME).outputStream().use {
+                props.store(it, "HUBONE Agent 설정 백업 — 앱 재설치와 무관하게 유지됨")
+            }
+        } catch (e: Exception) {
+            Log.w("AgentConfig", "durable backup save failed: ${e.message}")
+        }
     }
 
     companion object {
         private const val FILE = "hubone_agent_config"
+        private const val BACKUP_FILE_NAME = "agent_config.properties"
 
         fun load(context: Context): AgentConfig {
             val p = context.getSharedPreferences(FILE, Context.MODE_PRIVATE)
+            // screenId 키 자체가 없으면(=SharedPreferences가 비어있는 새 설치) 외부
+            // 백업 파일에서 복구를 먼저 시도한다. 파일이 없거나 못 읽으면 그냥 기본값으로
+            // 진행 — 처음 설치라면 원래도 기본값이 맞다.
+            if (!p.contains("screenId")) {
+                loadDurableBackup()?.let { restored ->
+                    restored.save(context)
+                    return restored
+                }
+            }
             return AgentConfig(
                 baseUrl = p.getString("baseUrl", DEFAULT_BASE_URL) ?: DEFAULT_BASE_URL,
                 screenId = p.getString("screenId", DEFAULT_SCREEN_ID) ?: DEFAULT_SCREEN_ID,
@@ -50,6 +90,24 @@ data class AgentConfig(
                 manualBaseUrl = p.getBoolean("manualBaseUrl", false),
                 manualBaseUrlVerified = p.getBoolean("manualBaseUrlVerified", false)
             )
+        }
+
+        private fun loadDurableBackup(): AgentConfig? {
+            return try {
+                val file = File(File(Environment.getExternalStorageDirectory(), "HubOneAgent"), BACKUP_FILE_NAME)
+                if (!file.exists()) return null
+                val props = Properties().apply { file.inputStream().use { load(it) } }
+                AgentConfig(
+                    baseUrl = props.getProperty("baseUrl", DEFAULT_BASE_URL),
+                    screenId = props.getProperty("screenId", DEFAULT_SCREEN_ID),
+                    dentwebPackage = props.getProperty("dentwebPackage", DEFAULT_DENTWEB_PACKAGE),
+                    manualBaseUrl = props.getProperty("manualBaseUrl", "false").toBoolean(),
+                    manualBaseUrlVerified = props.getProperty("manualBaseUrlVerified", "false").toBoolean()
+                )
+            } catch (e: Exception) {
+                Log.w("AgentConfig", "durable backup load failed: ${e.message}")
+                null
+            }
         }
 
         const val DEFAULT_BASE_URL = "http://192.168.0.13:8001"

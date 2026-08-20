@@ -3,6 +3,18 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <!-- 태블릿 이름(SCREEN_ID) 등 설정값을 앱 재설치와 무관하게 남는 공용 외부 저장소에도
+         백업해두기 위한 권한 — 실제 겪은 문제: "재빌드/재설치할 때마다 태블릿 이름을 매번
+         다시 설정해야 함"(SharedPreferences는 "데이터 지우고 설치" 방식 재설치 시 삭제됨).
+         구버전 WRITE_EXTERNAL_STORAGE만으로는 Android 10+ 범위저장소 제한에 걸려서
+         MANAGE_EXTERNAL_STORAGE가 필요하다 — 관리자 설정의 "설정 백업 저장소 허용"
+         버튼으로 사용자가 직접 켜야 한다(Play 스토어 배포가 아닌 사내 사이드로드 앱이라
+         이 권한 사용에 제약이 없음). 허용 안 해도 앱은 정상 동작하고(SharedPreferences만
+         쓰는 기존 방식), 재설치 후 자동 복구만 안 된다. -->
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="29" tools:ignore="ScopedStorage" />
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE"
+        tools:ignore="ScopedStorage" />
     <!-- 예약 태블릿(/pt/reserve)의 실시간 통역 마이크(getUserMedia/네이티브 녹음)를
          웹뷰가 승인할 수 있으려면 이 선언이 있어야 한다. -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />

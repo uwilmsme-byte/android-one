@@ -14,6 +14,7 @@ import android.provider.Settings
 import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
+import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import java.net.HttpURLConnection
@@ -28,6 +29,7 @@ class SettingsActivity : Activity() {
     private lateinit var usagePermissionButton: Button
     private lateinit var overlayPermissionButton: Button
     private lateinit var deviceAdminPermissionButton: Button
+    private lateinit var storagePermissionButton: Button
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -65,10 +67,11 @@ class SettingsActivity : Activity() {
         // 시스템 설정 화면으로 직접 보내야 한다 — 허용하면 보드 탭에 덴트웹 앱이 실제
         // 전면인지 정확히 표시되고(추정치가 아니라), 허용 안 해도 앱은 정상 동작한다
         // (마지막으로 내린 명령 기준 추정치로 자동 폴백).
-        val permissionRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
+        val permissionGrid = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
             setPadding(0, 12, 0, 0)
         }
+        fun permissionRow() = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         fun permissionButton(label: String, onClick: () -> Unit): Button {
             return Button(this).apply {
                 text = label
@@ -105,10 +108,35 @@ class SettingsActivity : Activity() {
             }
             startActivity(intent)
         }
-        listOf(cameraPermissionButton, microphonePermissionButton, usagePermissionButton, overlayPermissionButton, deviceAdminPermissionButton).forEach { button ->
-            permissionRow.addView(button, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = 8 })
+        // 태블릿 이름(SCREEN_ID) 등 설정을 앱 재설치와 무관한 외부 저장소에도 백업해두는
+        // AgentConfig.saveDurableBackup()이 쓰려면 필요 — 실제 겪은 문제: "재빌드/재설치할
+        // 때마다 태블릿 이름을 매번 다시 설정해야 함". Android 11+는 일반 런타임 권한창이
+        // 아니라 앱별 전체 파일 접근 설정 화면으로 보내야 한다.
+        storagePermissionButton = permissionButton("설정 백업\n저장소 허용") {
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+                try {
+                    startActivity(Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, Uri.parse("package:$packageName")))
+                } catch (_: Exception) {
+                    startActivity(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION))
+                }
+            } else {
+                // Android 10 이하는 일반 런타임 권한창으로 충분하다(범위저장소 예외 대상).
+                requestRuntimePermission(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+            }
         }
-        root.addView(permissionRow)
+        // 실제 겪은 문제: "절전 관련 설정 버튼이 안 보임" — 한 줄에 다 욱여넣으면(이제 6개)
+        // 화면 밖으로 밀려 잘려 보일 수 있어 두 줄로 나눈다. 각 행은 MATCH_PARENT로 명시해야
+        // weight=1f가 실제로 화면 폭 기준으로 균등 분배된다(WRAP_CONTENT 부모면 무의미해짐).
+        val permRowParams = { LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT) }
+        fun fillRow(row: LinearLayout, buttons: List<Button>) {
+            buttons.forEach { button ->
+                row.addView(button, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = 8 })
+            }
+            permissionGrid.addView(row, permRowParams())
+        }
+        fillRow(permissionRow(), listOf(cameraPermissionButton, microphonePermissionButton, usagePermissionButton))
+        fillRow(permissionRow(), listOf(overlayPermissionButton, deviceAdminPermissionButton, storagePermissionButton))
+        root.addView(permissionGrid, permRowParams())
         root.addView(TextView(this).apply {
             text = "허용하면 허브원 보드 탭에서 덴트웹 환자용 앱이 실제 전면인지 정확히 표시합니다. 허용 안 해도 동작은 하되 추정치로만 표시됩니다."
             textSize = 12f
@@ -146,20 +174,24 @@ class SettingsActivity : Activity() {
                 marginEnd = if (row.childCount > 0) 12 else 0
             })
         }
+        val rowLayoutParams = { LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT) }
         val row1 = buttonRow()
         addButton(row1, "연결 테스트") { testConnection() }
         addButton(row1, "자동 검색") { discoverServer() }
-        buttonsGrid.addView(row1)
+        buttonsGrid.addView(row1, rowLayoutParams())
         val row2 = buttonRow()
         addButton(row2, "현재 URL 열기") { save(); openMain() }
         addButton(row2, "앱 재시작") { save(); openMain() }
-        buttonsGrid.addView(row2)
+        buttonsGrid.addView(row2, rowLayoutParams())
         val row3 = buttonRow()
         addButton(row3, "기본값 복원") { restoreDefaults() }
         addButton(row3, "저장") { save(); finish() }
-        buttonsGrid.addView(row3)
-        root.addView(buttonsGrid)
-        setContentView(root)
+        buttonsGrid.addView(row3, rowLayoutParams())
+        root.addView(buttonsGrid, rowLayoutParams())
+        // 오늘 하루에도 버튼/설명이 계속 늘어서(카메라·마이크·전면앱확인·화면위표시·절전명령
+        // 5개 권한 버튼 + 6개 동작 버튼) 세로 길이가 화면을 넘어설 수 있다 — ScrollView로
+        // 감싸서 아래쪽 버튼이 화면 밖으로 잘리지 않게 방어적으로 처리한다.
+        setContentView(ScrollView(this).apply { addView(root) })
         refreshPermissionButtons()
     }
 
@@ -182,6 +214,7 @@ class SettingsActivity : Activity() {
         usagePermissionButton.text = if (hasUsageAccess()) "전면 앱 확인\n✓ 허용됨" else "전면 앱 확인\n허용"
         overlayPermissionButton.text = if (Settings.canDrawOverlays(this)) "화면 위 표시\n✓ 허용됨" else "화면 위 표시\n허용"
         deviceAdminPermissionButton.text = if (isDeviceAdminActive()) "절전 명령\n✓ 허용됨" else "절전 명령\n허용"
+        storagePermissionButton.text = if (hasStorageAccess()) "설정 백업\n✓ 허용됨" else "설정 백업\n저장소 허용"
     }
 
     private fun deviceAdminComponent(): ComponentName =
@@ -199,6 +232,14 @@ class SettingsActivity : Activity() {
     private fun hasUsageAccess(): Boolean {
         val appOps = getSystemService(AppOpsManager::class.java)
         return appOps?.checkOpNoThrow(AppOpsManager.OPSTR_GET_USAGE_STATS, Process.myUid(), packageName) == AppOpsManager.MODE_ALLOWED
+    }
+
+    private fun hasStorageAccess(): Boolean {
+        return if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+            android.os.Environment.isExternalStorageManager()
+        } else {
+            checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
+        }
     }
 
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
