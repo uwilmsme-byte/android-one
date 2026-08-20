@@ -106,20 +106,13 @@ class MainActivity : Activity(), LifecycleOwner {
         super.onCreate(savedInstanceState)
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_CREATE)
         requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
-        // "wake" 명령용 — 화면이 꺼져 있거나(sleep 명령으로 잠긴 상태 포함) 이
-        // 액티비티가 다시 앞으로 나오면 화면을 즉시 켠다. 태블릿에 PIN/패턴 잠금이
-        // 없는 키오스크 구성을 전제로 한다(있으면 화면은 켜져도 잠금해제는 별도로
-        // 필요) — 실제 요청 사항: "정해진 시간에 켜지고 꺼지고 하는게 가능한지".
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
-            setShowWhenLocked(true)
-            setTurnScreenOn(true)
-        } else {
-            @Suppress("DEPRECATION")
-            window.addFlags(
-                WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
-                    WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON or
-                    WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
-            )
+        // "wake"/open_contact/open_reservation 명령으로 불려나온 경우에만 화면을 깨운다
+        // — 실제 겪은 문제: 이 플래그를 계속 켜둔 채로 두면(이전 구현) MainActivity 창이
+        // 살아있는 한 sleep으로 화면을 꺼도 시스템이 곧바로 다시 켜버려서 "절전 누르면
+        // 꺼졌다가 도로 켜짐" 버그가 났다. wakeScreenTransiently()가 필요한 순간에만
+        // 켰다가 짧게 켠 뒤 스스로 꺼서, 다음 sleep 명령을 방해하지 않는다.
+        if (intent?.getStringExtra(EXTRA_SCREEN_COMMAND) != null) {
+            wakeScreenTransiently()
         }
         enterImmersiveMode()
         config = AgentConfig.load(this)
@@ -220,10 +213,46 @@ class MainActivity : Activity(), LifecycleOwner {
     override fun onNewIntent(newIntent: Intent) {
         super.onNewIntent(newIntent)
         setIntent(newIntent)
+        // singleTask라 이미 떠 있는 상태에서 명령이 오면 onCreate가 아니라 여기로
+        // 들어온다 — wake/open_contact/open_reservation 명령이면 여기서도 화면을 깨워야
+        // 한다(실제 겪은 문제와 동일한 이유로, 필요할 때만 짧게).
+        if (newIntent.getStringExtra(EXTRA_SCREEN_COMMAND) != null) {
+            wakeScreenTransiently()
+        }
         if (::webView.isInitialized) {
             applyScreenExtra(newIntent)
             loadConfiguredPage()
         }
+    }
+
+    // 화면을 잠깐 켠 상태로 만들었다가 스스로 원상복구한다 — 계속 켜둔 채로 두면
+    // sleep(DevicePolicyManager.lockNow())으로 꺼도 시스템이 이 창을 보고 곧바로 다시
+    // 켜버린다(실제 겪은 문제: "절전 누르기 꺼졌다가 도로 다시 켜짐").
+    private fun wakeScreenTransiently() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+            setShowWhenLocked(true)
+            setTurnScreenOn(true)
+        } else {
+            @Suppress("DEPRECATION")
+            window.addFlags(
+                WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
+                    WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON or
+                    WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
+            )
+        }
+        Handler(Looper.getMainLooper()).postDelayed({
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+                setShowWhenLocked(false)
+                setTurnScreenOn(false)
+            } else {
+                @Suppress("DEPRECATION")
+                window.clearFlags(
+                    WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
+                        WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON or
+                        WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
+                )
+            }
+        }, 2_000)
     }
 
     private fun applyScreenExtra(source: Intent?) {
