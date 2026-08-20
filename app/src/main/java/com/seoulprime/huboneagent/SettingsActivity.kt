@@ -56,12 +56,20 @@ class SettingsActivity : Activity() {
         })
         baseUrl = addField(root, "HUBONE_BASE_URL", config.baseUrl)
         screenId = addField(root, "SCREEN_ID", config.screenId)
-        root.addView(TextView(this).apply {
+        // 실제 요청 사항: "덴트웹 앱 패키지명 설정은 숨기기. 변하지 않음." — 기기마다
+        // 값이 달라질 일이 실질적으로 없어서 화면에서만 숨긴다(삭제 아님, GONE) —
+        // AgentConfig에는 그대로 저장되고 필요하면 나중에 다시 보이게 할 수 있다.
+        val dentwebSection = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            visibility = android.view.View.GONE
+        }
+        dentwebSection.addView(TextView(this).apply {
             text = "덴트웹 앱 패키지명 — 기본값은 고객용 앱(kr.co.DentWeb.DentWebCustomer). 실기기 사정에 따라 다르면 adb shell pm list packages 등으로 확인 후 바꿔서 입력. 비워두면 \"덴트웹으로 전환\" 명령을 무시합니다."
             setPadding(0, 12, 0, 4)
             textSize = 13f
         })
-        dentwebPackage = addField(root, "DENTWEB_PACKAGE (예: com.example.dentweb)", config.dentwebPackage)
+        dentwebPackage = addField(dentwebSection, "DENTWEB_PACKAGE (예: com.example.dentweb)", config.dentwebPackage)
+        root.addView(dentwebSection)
 
         // 사용정보 접근(PACKAGE_USAGE_STATS)은 일반 권한창으로 못 받는 특수 권한이라
         // 시스템 설정 화면으로 직접 보내야 한다 — 허용하면 보드 탭에 덴트웹 앱이 실제
