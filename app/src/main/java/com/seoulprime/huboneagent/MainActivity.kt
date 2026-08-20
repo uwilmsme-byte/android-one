@@ -104,19 +104,25 @@ class MainActivity : Activity(), LifecycleOwner {
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        activeInstance = this
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_CREATE)
         requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+        enterImmersiveMode()
+        config = AgentConfig.load(this)
+        applyScreenPolicy()
         // "wake"/open_contact/open_reservation 명령으로 불려나온 경우에만 화면을 깨운다
         // — 실제 겪은 문제: 이 플래그를 계속 켜둔 채로 두면(이전 구현) MainActivity 창이
         // 살아있는 한 sleep으로 화면을 꺼도 시스템이 곧바로 다시 켜버려서 "절전 누르면
         // 꺼졌다가 도로 켜짐" 버그가 났다. wakeScreenTransiently()가 필요한 순간에만
-        // 켰다가 짧게 켠 뒤 스스로 꺼서, 다음 sleep 명령을 방해하지 않는다.
+        // 켰다가 짧게 켠 뒤 스스로 꺼서, 다음 sleep 명령을 방해하지 않는다. config가
+        // 로드된 뒤에 불러야 한다(wakeScreenTransiently가 applyScreenPolicy를 다시
+        // 호출하는데, config가 lateinit이라 그 전에 부르면 초기화 예외가 난다).
         if (intent?.getStringExtra(EXTRA_SCREEN_COMMAND) != null) {
             wakeScreenTransiently()
         }
-        enterImmersiveMode()
-        config = AgentConfig.load(this)
-        applyScreenPolicy()
+        if (intent?.getBooleanExtra(EXTRA_THEN_LAUNCH_DENTWEB, false) == true) {
+            launchDentWebAfterResume()
+        }
 
         webView = WebView(this).apply {
             settings.javaScriptEnabled = true
@@ -219,16 +225,45 @@ class MainActivity : Activity(), LifecycleOwner {
         if (newIntent.getStringExtra(EXTRA_SCREEN_COMMAND) != null) {
             wakeScreenTransiently()
         }
+        if (newIntent.getBooleanExtra(EXTRA_THEN_LAUNCH_DENTWEB, false)) {
+            launchDentWebAfterResume()
+        }
         if (::webView.isInitialized) {
             applyScreenExtra(newIntent)
             loadConfiguredPage()
         }
     }
 
+    // "덴트웹" 명령이 왔을 때 화면이 잠겨있으면(잠금화면 위에 덴트웹을 바로 띄울 방법이
+    // 없음 — 남의 앱이라 우리처럼 setShowWhenLocked를 걸 수 없다), CommandPollService가
+    // 이 액티비티부터 잠금화면 위로 띄운 다음(wakeScreenTransiently) 여기서 이어서
+    // 덴트웹을 실행한다 — 실제 겪은 문제: "잠금화면 상태에서 덴트웹 눌러도 잠금화면
+    // 해제는 안됨". 우리 창이 실제로 잠금화면 위에 떠서 화면이 인터랙티브해진 뒤에
+    // 실행해야 하므로 약간의 지연을 둔다.
+    private fun launchDentWebAfterResume() {
+        Handler(Looper.getMainLooper()).postDelayed({
+            val pkg = AgentConfig.load(this).dentwebPackage.trim()
+            if (pkg.isBlank()) return@postDelayed
+            val launchIntent = try { packageManager.getLaunchIntentForPackage(pkg) } catch (_: Exception) { null }
+            if (launchIntent == null) return@postDelayed
+            launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
+            try {
+                startActivity(launchIntent)
+                CommandPollState.currentScreen = CommandPollState.SCREEN_DENTWEB
+            } catch (_: Exception) {
+                // 실패해도 최소한 우리 화면(/pt)은 잠금화면 위에 떠 있으니 조작은 가능하다.
+            }
+        }, 400)
+    }
+
     // 화면을 잠깐 켠 상태로 만들었다가 스스로 원상복구한다 — 계속 켜둔 채로 두면
     // sleep(DevicePolicyManager.lockNow())으로 꺼도 시스템이 이 창을 보고 곧바로 다시
     // 켜버린다(실제 겪은 문제: "절전 누르기 꺼졌다가 도로 다시 켜짐").
     private fun wakeScreenTransiently() {
+        // CommandPollService.sleepDevice()가 절전 직전에 FLAG_KEEP_SCREEN_ON을 꺼뒀을 수
+        // 있다("화면 항상 켜짐" 설정이 절전과 충돌하던 문제) — 다시 깨어나는 시점에
+        // config대로 복원한다.
+        applyScreenPolicy()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
             setShowWhenLocked(true)
             setTurnScreenOn(true)
@@ -301,6 +336,7 @@ class MainActivity : Activity(), LifecycleOwner {
 
     override fun onDestroy() {
         super.onDestroy()
+        if (activeInstance === this) activeInstance = null
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_DESTROY)
     }
 
@@ -475,6 +511,15 @@ class MainActivity : Activity(), LifecycleOwner {
     private fun applyScreenPolicy() {
         if (config.keepScreenOn) window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         else window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+    }
+
+    // CommandPollService.sleepDevice()가 lockNow() 직전에 호출한다 — "화면 항상 켜짐"
+    // 설정(config.keepScreenOn, 기본 true)이 FLAG_KEEP_SCREEN_ON으로 켜져 있으면
+    // 절전(lockNow)과 정면 충돌해서 화면이 곧바로 다시 켜졌다(실제 겪은 문제: "절전
+    // 눌러도 잠금화면이 꺼졌다가 다시 켜짐"). 다시 깨어날 때는 wakeScreenTransiently()가
+    // applyScreenPolicy()를 다시 호출해 config대로 복원한다.
+    fun clearKeepScreenOnForSleep() {
+        try { window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON) } catch (_: Exception) { /* 무시 */ }
     }
 
     private fun enterImmersiveMode() {
@@ -996,5 +1041,16 @@ class MainActivity : Activity(), LifecycleOwner {
         // 어느 화면을 띄울지 실어 보내는 Intent extra 키 — CommandPollState.SCREEN_CONTACT/
         // SCREEN_RESERVATION 값을 그대로 담는다.
         const val EXTRA_SCREEN_COMMAND = "screen_command"
+        // 잠금화면 상태에서 "덴트웹" 명령이 왔을 때, 이 액티비티가 잠금화면 위로 뜬 뒤
+        // 이어서 덴트웹을 실행하라는 표시 — 실제 겪은 문제: "잠금화면 상태에서 덴트웹
+        // 눌러도 잠금화면 해제는 안됨"(남의 앱은 우리처럼 잠금화면 위에 못 뜬다).
+        const val EXTRA_THEN_LAUNCH_DENTWEB = "then_launch_dentweb"
+
+        // sleep 직전에 FLAG_KEEP_SCREEN_ON을 꺼야 하는 CommandPollService, 그리고
+        // 잠금화면 상태에서 덴트웹으로 이어줘야 하는 launchDentWeb() 둘 다 살아있는
+        // MainActivity 창에 접근해야 해서 둔다 — 같은 프로세스 안이라 SharedPreferences나
+        // IPC 없이 static 참조로 충분하다(CommandPollState와 동일한 전제).
+        @Volatile
+        var activeInstance: MainActivity? = null
     }
 }

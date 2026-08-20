@@ -270,6 +270,19 @@ class CommandPollService : Service() {
         if (!dpm.isAdminActive(admin)) {
             return false to "기기 관리자 권한이 없습니다 — 태블릿 관리자 설정에서 \"절전 명령 허용\"을 먼저 켜주세요."
         }
+        // "화면 항상 켜짐"(config.keepScreenOn, 기본 true) 설정이 FLAG_KEEP_SCREEN_ON으로
+        // MainActivity 창에 걸려 있으면 lockNow()와 정면 충돌해서 화면이 곧바로 다시
+        // 켜졌다(실제 겪은 문제: "절전 눌러도 잠금화면이 꺼졌다가 다시 켜짐"). 절전 직전에
+        // 꺼둔다 — 다시 깨어날 때 MainActivity.wakeScreenTransiently()가 복원한다.
+        // UI 스레드 작업이라 메인 스레드에 올리되, lockNow()보다 먼저 반드시 끝나야 하므로
+        // CountDownLatch로 완료를 기다린다(이 함수 자체는 백그라운드 스레드에서 실행됨).
+        MainActivity.activeInstance?.let { activity ->
+            val latch = java.util.concurrent.CountDownLatch(1)
+            Handler(Looper.getMainLooper()).post {
+                try { activity.clearKeepScreenOnForSleep() } finally { latch.countDown() }
+            }
+            try { latch.await(1, java.util.concurrent.TimeUnit.SECONDS) } catch (_: InterruptedException) { /* 무시 */ }
+        }
         return try {
             dpm.lockNow()
             true to "절전 모드로 전환했습니다."
@@ -307,6 +320,24 @@ class CommandPollService : Service() {
         val pkg = config.dentwebPackage.trim()
         if (pkg.isBlank()) {
             return false to "덴트웹 앱 패키지명이 설정되지 않았습니다."
+        }
+        // 잠금화면 상태면 덴트웹(남의 앱)을 직접 띄워도 잠금화면 위로 올라오지 못한다
+        // (우리처럼 setShowWhenLocked를 걸 수 있는 건 우리 액티비티뿐) — 실제 겪은 문제:
+        // "잠금화면 상태에서 덴트웹 눌러도 잠금화면 해제는 안됨". 이 경우 MainActivity를
+        // 먼저 잠금화면 위로 띄운 뒤(wakeScreenTransiently) 이어서 덴트웹을 실행한다.
+        // 평소(잠금 아님)에는 그대로 직접 실행 — /pt 화면이 잠깐 스칠 필요가 없다.
+        val keyguard = getSystemService(android.app.KeyguardManager::class.java)
+        if (keyguard?.isKeyguardLocked == true) {
+            val intent = Intent(this, MainActivity::class.java).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
+                putExtra(MainActivity.EXTRA_THEN_LAUNCH_DENTWEB, true)
+            }
+            return try {
+                startActivity(intent)
+                true to "잠금화면 위로 전환 후 덴트웹 앱을 실행합니다."
+            } catch (e: Exception) {
+                false to "잠금화면에서 포커스 전환 실패: ${e.javaClass.simpleName}: ${e.message ?: "unknown"}"
+            }
         }
         val intent = try {
             packageManager.getLaunchIntentForPackage(pkg)
