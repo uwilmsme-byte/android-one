@@ -197,7 +197,13 @@ class CommandPollService : Service() {
                 val json = JSONObject(body)
                 val commandId = json.optInt("command_id", 0)
                 val commandToken = json.optString("command_token", "")
-                val command = json.optString("command", "")
+                // 실제 겪은 심각한 버그: 서버가 명령이 없을 때 {"command": null}(JSON null)을
+                // 보내는데, org.json.JSONObject.optString()은 JSON null 값을 기본값("")이
+                // 아니라 문자열 "null"로 돌려준다 — isBlank() 체크를 통과 못 해서 매 폴링
+                // (3초)마다 "sleep이 아닌 명령"으로 오인, wakeScreenBriefly()가 계속 불려서
+                // 절전이 무조건 3초 안에 풀렸다("여전히 켜짐" 로그로 확정). isNull()로
+                // JSON null을 먼저 걸러내야 한다.
+                val command = if (json.isNull("command")) "" else json.optString("command", "")
                 android.util.Log.d("HubOneSleep", "poll received command='$command' token=$commandToken id=$commandId screenOn=$screenOn")
                 if (command.isBlank()) return@Thread
 
