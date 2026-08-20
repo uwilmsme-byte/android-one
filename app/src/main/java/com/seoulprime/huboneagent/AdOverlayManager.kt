@@ -114,8 +114,9 @@ class AdOverlayManager(private val context: Context) {
                     if (adOverlayView != null) {
                         // 정상적으로는 광고 창 자체의 클릭 리스너가 먼저 받아가지만
                         // (전체화면을 덮고 있어 더 위에 뜸), 기기/OEM에 따라 바깥터치
-                        // 감시 창이 대신 받는 경우를 대비한 동일 동작 백업.
-                        dismissAdAndGoToContact()
+                        // 감시 창이 대신 받는 경우를 대비한 동일 동작 백업 — 분리 터치가
+                        // 꺼져 있으면 이쪽도 똑같이 직전 화면(덴트웹)에 남는다.
+                        if (touchSplitEnabled) dismissAdAndGoToContact() else dismissAdStayOnDentweb()
                     } else if (armed) {
                         resetIdleTimer()
                     }
@@ -184,8 +185,11 @@ class AdOverlayManager(private val context: Context) {
             // ACTION_DOWN에서 바로 판정한다(빠른 반응, 드래그/스와이프 구분 불필요).
             iv.setOnTouchListener { v, event ->
                 if (event.action == MotionEvent.ACTION_DOWN) {
+                    // 분리 터치를 꺼두면(실제 요청 사항: "끄면 직전 화면으로 돌아가는걸로")
+                    // 어디를 눌러도 그냥 광고만 걷고 원래 떠 있던 화면(덴트웹)에 남는다 —
+                    // 이 오버레이는 덴트웹이 전면일 때만 뜨므로 "직전 화면"은 항상 덴트웹.
                     if (!touchSplitEnabled) {
-                        dismissAdAndGoToContact()
+                        dismissAdStayOnDentweb()
                     } else {
                         val isRightHalf = event.x >= v.width / 2f
                         if (isRightHalf) dismissAdAndGoToContact() else dismissAdStayOnDentweb()
