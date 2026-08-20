@@ -2,7 +2,9 @@ package com.seoulprime.huboneagent
 
 import android.app.Activity
 import android.app.AppOpsManager
+import android.app.admin.DevicePolicyManager
 import android.Manifest
+import android.content.ComponentName
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
@@ -25,6 +27,7 @@ class SettingsActivity : Activity() {
     private lateinit var microphonePermissionButton: Button
     private lateinit var usagePermissionButton: Button
     private lateinit var overlayPermissionButton: Button
+    private lateinit var deviceAdminPermissionButton: Button
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -84,7 +87,25 @@ class SettingsActivity : Activity() {
             startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")))
             Toast.makeText(this@SettingsActivity, "목록에서 HUBONE Agent를 켜주세요.", Toast.LENGTH_LONG).show()
         }
-        listOf(cameraPermissionButton, microphonePermissionButton, usagePermissionButton, overlayPermissionButton).forEach { button ->
+        // 절전(sleep) 명령(DevicePolicyManager.lockNow())을 쓰려면 기기 관리자로
+        // 활성화돼 있어야 한다 — 기기 소유자(Device Owner, 재설정 필요)와 달리 설정에서
+        // 사용자가 버튼 하나로 켜고 끌 수 있는 가벼운 권한이다. 실제 요청 사항:
+        // "태블릿에 sleep모드로 가는 명령을 줄 수 있는지".
+        deviceAdminPermissionButton = permissionButton("절전 명령\n허용") {
+            if (isDeviceAdminActive()) {
+                Toast.makeText(this@SettingsActivity, "이미 허용되어 있습니다.", Toast.LENGTH_SHORT).show()
+                return@permissionButton
+            }
+            val intent = Intent(DevicePolicyManager.ACTION_ADD_DEVICE_ADMIN).apply {
+                putExtra(DevicePolicyManager.EXTRA_DEVICE_ADMIN, deviceAdminComponent())
+                putExtra(
+                    DevicePolicyManager.EXTRA_ADD_EXPLANATION,
+                    "허브원 콘솔에서 태블릿을 절전(화면 꺼짐+잠금) 시키는 명령을 쓰려면 필요합니다."
+                )
+            }
+            startActivity(intent)
+        }
+        listOf(cameraPermissionButton, microphonePermissionButton, usagePermissionButton, overlayPermissionButton, deviceAdminPermissionButton).forEach { button ->
             permissionRow.addView(button, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = 8 })
         }
         root.addView(permissionRow)
@@ -160,6 +181,15 @@ class SettingsActivity : Activity() {
         microphonePermissionButton.text = runtimePermissionLabel("마이크", Manifest.permission.RECORD_AUDIO)
         usagePermissionButton.text = if (hasUsageAccess()) "전면 앱 확인\n✓ 허용됨" else "전면 앱 확인\n허용"
         overlayPermissionButton.text = if (Settings.canDrawOverlays(this)) "화면 위 표시\n✓ 허용됨" else "화면 위 표시\n허용"
+        deviceAdminPermissionButton.text = if (isDeviceAdminActive()) "절전 명령\n✓ 허용됨" else "절전 명령\n허용"
+    }
+
+    private fun deviceAdminComponent(): ComponentName =
+        ComponentName(this, HubOneDeviceAdminReceiver::class.java)
+
+    private fun isDeviceAdminActive(): Boolean {
+        val dpm = getSystemService(DevicePolicyManager::class.java) ?: return false
+        return dpm.isAdminActive(deviceAdminComponent())
     }
 
     private fun runtimePermissionLabel(name: String, permission: String): String {

@@ -14,6 +14,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.os.PowerManager
 import android.os.Process
 import android.provider.Settings
 import android.view.View
@@ -217,11 +218,59 @@ class CommandPollService : Service() {
     }
 
     private fun applyCommand(command: String): Pair<Boolean, String> {
+        // sleep을 뺀 나머지 모든 명령은 화면을 먼저 깨운다 — open_contact/wake는
+        // MainActivity의 setShowWhenLocked/setTurnScreenOn으로 어차피 켜지지만,
+        // return_to_dentweb은 우리 앱이 아닌 남의 앱을 실행하는 거라 그 앱이 스스로
+        // 화면을 켜준다는 보장이 없다(실제 지적 사항: "덴트웹이나 외국인 접수만
+        // 눌러도 꺼진 상태면 자동으로 켜지겠죠?" — 모든 명령에서 똑같이 보장하려면
+        // 여기서 공통으로 깨워야 한다).
+        if (command != "sleep") wakeScreenBriefly()
         return when (command) {
             "open_contact" -> bringMainActivityToFront(CommandPollState.SCREEN_CONTACT)
             "open_reservation" -> bringMainActivityToFront(CommandPollState.SCREEN_RESERVATION)
             "return_to_dentweb" -> launchDentWeb()
+            "sleep" -> sleepDevice()
+            "wake" -> bringMainActivityToFront(CommandPollState.SCREEN_CONTACT)
             else -> false to "알 수 없는 명령입니다: $command"
+        }
+    }
+
+    // WAKE_LOCK 권한(이미 선언돼 있음)만으로 되는 화면 깨우기 — SCREEN_BRIGHT_WAKE_LOCK +
+    // ACQUIRE_CAUSES_WAKEUP은 최신 API에서 deprecated이지만, "서비스에서 화면을 즉시
+    // 켠다"는 목적에 맞는 대체 API가 따로 없어 그대로 쓴다. 10초 뒤 자동 해제되도록
+    // 타임아웃을 줘서(acquire(ms)) 혹시 release()를 놓쳐도 화면이 계속 켜진 채로
+    // 남는 배터리 문제를 방지한다.
+    @Suppress("DEPRECATION")
+    private fun wakeScreenBriefly() {
+        try {
+            val pm = getSystemService(PowerManager::class.java) ?: return
+            val wakeLock = pm.newWakeLock(
+                PowerManager.SCREEN_BRIGHT_WAKE_LOCK or
+                    PowerManager.ACQUIRE_CAUSES_WAKEUP or
+                    PowerManager.ON_AFTER_RELEASE,
+                "HuBoneAgent:CommandWake"
+            )
+            wakeLock.acquire(10_000)
+            wakeLock.release()
+        } catch (_: Exception) {
+            // 화면 깨우기는 부가 기능이라 실패해도 명령 자체(예: 덴트웹 전환)는 계속 진행한다.
+        }
+    }
+
+    // 절전(sleep) — 기기 관리자(HubOneDeviceAdminReceiver)가 활성화돼 있어야 한다.
+    // 관리자 설정에서 "절전 명령 허용" 버튼으로 한 번 켜두면 된다.
+    private fun sleepDevice(): Pair<Boolean, String> {
+        val dpm = getSystemService(android.app.admin.DevicePolicyManager::class.java)
+            ?: return false to "DevicePolicyManager를 가져올 수 없습니다."
+        val admin = android.content.ComponentName(this, HubOneDeviceAdminReceiver::class.java)
+        if (!dpm.isAdminActive(admin)) {
+            return false to "기기 관리자 권한이 없습니다 — 태블릿 관리자 설정에서 \"절전 명령 허용\"을 먼저 켜주세요."
+        }
+        return try {
+            dpm.lockNow()
+            true to "절전 모드로 전환했습니다."
+        } catch (e: Exception) {
+            false to "절전 전환 실패: ${e.javaClass.simpleName}: ${e.message ?: "unknown"}"
         }
     }
 

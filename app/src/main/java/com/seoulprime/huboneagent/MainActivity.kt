@@ -16,6 +16,7 @@ import android.graphics.Path
 import android.graphics.RectF
 import android.media.MediaRecorder
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -105,6 +106,21 @@ class MainActivity : Activity(), LifecycleOwner {
         super.onCreate(savedInstanceState)
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_CREATE)
         requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+        // "wake" 명령용 — 화면이 꺼져 있거나(sleep 명령으로 잠긴 상태 포함) 이
+        // 액티비티가 다시 앞으로 나오면 화면을 즉시 켠다. 태블릿에 PIN/패턴 잠금이
+        // 없는 키오스크 구성을 전제로 한다(있으면 화면은 켜져도 잠금해제는 별도로
+        // 필요) — 실제 요청 사항: "정해진 시간에 켜지고 꺼지고 하는게 가능한지".
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+            setShowWhenLocked(true)
+            setTurnScreenOn(true)
+        } else {
+            @Suppress("DEPRECATION")
+            window.addFlags(
+                WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
+                    WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON or
+                    WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
+            )
+        }
         enterImmersiveMode()
         config = AgentConfig.load(this)
         applyScreenPolicy()

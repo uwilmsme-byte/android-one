@@ -68,6 +68,19 @@
                 <action android:name="android.intent.action.LOCKED_BOOT_COMPLETED" />
             </intent-filter>
         </receiver>
+        <!-- 절전(sleep) 명령용 — HubOneDeviceAdminReceiver 참고. android:permission
+             선언이 필수(시스템만 이 리시버를 호출할 수 있게 강제). -->
+        <receiver
+            android:name=".HubOneDeviceAdminReceiver"
+            android:permission="android.permission.BIND_DEVICE_ADMIN"
+            android:exported="true">
+            <meta-data
+                android:name="android.app.device_admin"
+                android:resource="@xml/device_admin_policies" />
+            <intent-filter>
+                <action android:name="android.app.action.DEVICE_ADMIN_ENABLED" />
+            </intent-filter>
+        </receiver>
         <service
             android:name=".CommandPollService"
             android:exported="false"
