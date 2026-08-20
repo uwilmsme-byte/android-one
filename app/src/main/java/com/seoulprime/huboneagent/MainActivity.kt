@@ -4,6 +4,7 @@ import android.Manifest
 import android.annotation.SuppressLint
 import android.app.Activity
 import android.app.AppOpsManager
+import android.app.KeyguardManager
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
@@ -256,9 +257,12 @@ class MainActivity : Activity(), LifecycleOwner {
         }, 400)
     }
 
-    // 화면을 잠깐 켠 상태로 만들었다가 스스로 원상복구한다 — 계속 켜둔 채로 두면
-    // sleep(DevicePolicyManager.lockNow())으로 꺼도 시스템이 이 창을 보고 곧바로 다시
-    // 켜버린다(실제 겪은 문제: "절전 누르기 꺼졌다가 도로 다시 켜짐").
+    // 화면을 깨우고 잠금을 실제로 해제한다 — 실제 겪은 문제 두 가지를 순서대로 고친
+    // 결과다: (1) 이 플래그를 계속 켜둔 채로 두면 sleep(lockNow())과 충돌해서 절전이
+    // 곧바로 풀렸다 → 일정 시간 뒤 자동으로 끄도록 고쳤더니, (2) "잠깐 보여주기"만 하고
+    // 진짜 잠금해제는 안 한 채로 그 타이머가 꺼버려서 몇 초 뒤 잠금화면이 다시 올라와
+    // "화면 나왔다가 대기화면으로 넘어감" 버그가 났다. requestDismissKeyguard()로 실제
+    // 잠금해제까지 하고, 그 콜백이 끝난 뒤에만 정리한다 — 고정 타이머로 추측하지 않는다.
     private fun wakeScreenTransiently() {
         // CommandPollService.sleepDevice()가 절전 직전에 FLAG_KEEP_SCREEN_ON을 꺼뒀을 수
         // 있다("화면 항상 켜짐" 설정이 절전과 충돌하던 문제) — 다시 깨어나는 시점에
@@ -275,19 +279,35 @@ class MainActivity : Activity(), LifecycleOwner {
                     WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
             )
         }
-        Handler(Looper.getMainLooper()).postDelayed({
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
-                setShowWhenLocked(false)
-                setTurnScreenOn(false)
-            } else {
-                @Suppress("DEPRECATION")
-                window.clearFlags(
-                    WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
-                        WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON or
-                        WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
-                )
-            }
-        }, 2_000)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val keyguard = getSystemService(KeyguardManager::class.java)
+            // 태블릿에 PIN/패턴 등 보안 잠금이 없는 키오스크 구성을 전제로 한다 — 그
+            // 경우 사용자 조작 없이 바로 해제된다. 보안 잠금이 있으면 시스템이 알아서
+            // 잠금해제 UI를 띄운다(우리가 대신 뚫을 방법은 없다 — 정상적인 보안 동작).
+            keyguard?.requestDismissKeyguard(this, object : KeyguardManager.KeyguardDismissCallback() {
+                override fun onDismissSucceeded() { clearTransientWakeFlags() }
+                override fun onDismissError() { clearTransientWakeFlags() }
+                override fun onDismissCancelled() { clearTransientWakeFlags() }
+            })
+        } else {
+            // API 26 미만은 requestDismissKeyguard가 없다 — 5초 뒤 정리(이 앱 minSdk가
+            // 29라 사실상 도달하지 않는 경로).
+            Handler(Looper.getMainLooper()).postDelayed({ clearTransientWakeFlags() }, 5_000)
+        }
+    }
+
+    private fun clearTransientWakeFlags() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+            setShowWhenLocked(false)
+            setTurnScreenOn(false)
+        } else {
+            @Suppress("DEPRECATION")
+            window.clearFlags(
+                WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
+                    WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON or
+                    WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
+            )
+        }
     }
 
     private fun applyScreenExtra(source: Intent?) {
