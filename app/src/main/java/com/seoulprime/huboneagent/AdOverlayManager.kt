@@ -74,6 +74,7 @@ class AdOverlayManager(private val context: Context) {
         ensureTouchWatcher()
         if (externalDentweb) {
             if (!armed) {
+                android.util.Log.d("HubOneSleep", "AdOverlayManager arming (externalDentweb=true), idle timer starting")
                 armed = true
                 resetIdleTimer()
             }
@@ -82,6 +83,18 @@ class AdOverlayManager(private val context: Context) {
             cancelIdleTimer()
             hideAdOverlay()
         }
+    }
+
+    // 절전(sleep) 명령 직전에 호출 — 무동작 타이머가 이미 돌고 있었다면(덴트웹 화면을
+    // 보다가 바로 절전을 누른 경우) 절전 이후에도 타이머가 살아있다가 광고 오버레이를
+    // 띄우면서 화면을 다시 깨울 수 있다. armed까지 false로 내려서 완전히 정지시킨다 —
+    // 다음 폴링에서 externalDentweb=true가 계속 확인되면 onPollTick()이 20초 카운트를
+    // 처음부터 다시 시작한다(teardown()과 달리 터치 watcher는 그대로 유지).
+    fun pauseIdleTimerForSleep() {
+        android.util.Log.d("HubOneSleep", "AdOverlayManager.pauseIdleTimerForSleep()")
+        armed = false
+        cancelIdleTimer()
+        hideAdOverlay()
     }
 
     fun teardown() {
@@ -143,6 +156,7 @@ class AdOverlayManager(private val context: Context) {
     }
 
     private fun showAdOverlay() {
+        android.util.Log.w("HubOneSleep", "AdOverlayManager.showAdOverlay() idle timer fired, armed=$armed")
         if (!armed) return
         val screen = configScreenId
         val base = configBaseUrl

@@ -103,6 +103,7 @@ class CommandPollService : Service() {
                 PixelFormat.TRANSLUCENT
             )
             view.alpha = 0f
+            android.util.Log.d("HubOneSleep", "ensureOverlayKeepAlive: adding keep-alive overlay view (was null)")
             windowManager.addView(view, params)
             overlayView = view
         } catch (_: Exception) {
@@ -197,6 +198,7 @@ class CommandPollService : Service() {
                 val commandId = json.optInt("command_id", 0)
                 val commandToken = json.optString("command_token", "")
                 val command = json.optString("command", "")
+                android.util.Log.d("HubOneSleep", "poll received command='$command' token=$commandToken id=$commandId screenOn=$screenOn")
                 if (command.isBlank()) return@Thread
 
                 // command_token은 서버가 FIFO 대기열 + ACK로 명령을 관리하는 식별자다 —
@@ -246,6 +248,7 @@ class CommandPollService : Service() {
     // 남는 배터리 문제를 방지한다.
     @Suppress("DEPRECATION")
     private fun wakeScreenBriefly() {
+        android.util.Log.w("HubOneSleep", "wakeScreenBriefly() called — screen will turn on now")
         try {
             val pm = getSystemService(PowerManager::class.java) ?: return
             val wakeLock = pm.newWakeLock(
@@ -283,7 +286,12 @@ class CommandPollService : Service() {
             }
             try { latch.await(1, java.util.concurrent.TimeUnit.SECONDS) } catch (_: InterruptedException) { /* 무시 */ }
         }
+        // 광고 오버레이 무동작 타이머가 이미 돌고 있었다면(덴트웹을 보다가 바로 절전을
+        // 누른 경우) 몇 초 뒤 타이머가 만료되며 오버레이를 띄우면서 화면을 다시 깨울 수
+        // 있다 — 절전 직전에 멈춘다(다음 폴링에서 여전히 덴트웹이면 처음부터 다시 잰다).
+        adOverlayManager.pauseIdleTimerForSleep()
         return try {
+            android.util.Log.w("HubOneSleep", "calling dpm.lockNow() now, activeInstance=${MainActivity.activeInstance != null}")
             dpm.lockNow()
             true to "절전 모드로 전환했습니다."
         } catch (e: Exception) {
