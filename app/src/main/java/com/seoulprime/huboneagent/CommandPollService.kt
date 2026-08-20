@@ -14,6 +14,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.os.PowerManager
 import android.os.Process
 import android.provider.Settings
 import android.view.View
@@ -57,8 +58,13 @@ class CommandPollService : Service() {
     // 띄워둬서 이 예외 조건을 만족시킨다.
     private var overlayView: View? = null
 
+    // 덴트웹 고객용 앱이 전면일 때도 대기 광고 슬라이드쇼를 보여주는 네이티브 오버레이
+    // — 실제 요청 사항: "덴트웹 화면에서도 같이 동작하기를 원함" (AdOverlayManager 참고).
+    private lateinit var adOverlayManager: AdOverlayManager
+
     override fun onCreate() {
         super.onCreate()
+        adOverlayManager = AdOverlayManager(this)
         startForeground(NOTIFICATION_ID, buildNotification())
         ensureOverlayKeepAlive()
         startPolling()
@@ -75,6 +81,7 @@ class CommandPollService : Service() {
     override fun onDestroy() {
         pollRunnable?.let { handler.removeCallbacks(it) }
         removeOverlayKeepAlive()
+        adOverlayManager.teardown()
         super.onDestroy()
     }
 
@@ -96,6 +103,7 @@ class CommandPollService : Service() {
                 PixelFormat.TRANSLUCENT
             )
             view.alpha = 0f
+            android.util.Log.d("HubOneSleep", "ensureOverlayKeepAlive: adding keep-alive overlay view (was null)")
             windowManager.addView(view, params)
             overlayView = view
         } catch (_: Exception) {
@@ -161,15 +169,22 @@ class CommandPollService : Service() {
         if (externalDentweb) {
             CommandPollState.currentScreen = CommandPollState.SCREEN_DENTWEB
         }
+        // 덴트웹이 전면일 때도 대기 광고 슬라이드쇼가 보이도록 — 웹뷰(/pt)가 전면일 때는
+        // JS 쪽(tablet_idle_overlay.js)이 이미 처리하므로 이 매니저는 손을 뗀다.
+        adOverlayManager.onPollTick(screen, base, externalDentweb)
         val currentScreen = CommandPollState.currentScreen
         val focused = !externalDentweb && CommandPollState.windowFocused
         val statusMessage = if (detected == null) "전면 앱 확인 권한이 없어 덴트웹 앱 상태를 추정치로만 보고합니다."
             else CommandPollState.lastStatusMessage
+        // 절전(sleep)/깨우기(wake) 명령이 실제로 먹혔는지 데스크 탭에서 확인할 수 있게
+        // — 실제 요청 사항: "절전 상태인지 깨있는 상태인지 감지는 안되나?".
+        val screenOn = getSystemService(PowerManager::class.java)?.isInteractive ?: true
 
         Thread {
             try {
                 val query = "screen_id=${Uri.encode(screen)}&current_screen=${Uri.encode(currentScreen)}" +
-                    "&focused=$focused&external_dentweb=$externalDentweb&status_message=${Uri.encode(statusMessage)}"
+                    "&focused=$focused&external_dentweb=$externalDentweb&status_message=${Uri.encode(statusMessage)}" +
+                    "&screen_on=$screenOn"
                 val conn = URL("$base/api/agent/command?$query").openConnection() as HttpURLConnection
                 conn.connectTimeout = 3_000
                 conn.readTimeout = 3_000
@@ -182,7 +197,14 @@ class CommandPollService : Service() {
                 val json = JSONObject(body)
                 val commandId = json.optInt("command_id", 0)
                 val commandToken = json.optString("command_token", "")
-                val command = json.optString("command", "")
+                // 실제 겪은 심각한 버그: 서버가 명령이 없을 때 {"command": null}(JSON null)을
+                // 보내는데, org.json.JSONObject.optString()은 JSON null 값을 기본값("")이
+                // 아니라 문자열 "null"로 돌려준다 — isBlank() 체크를 통과 못 해서 매 폴링
+                // (3초)마다 "sleep이 아닌 명령"으로 오인, wakeScreenBriefly()가 계속 불려서
+                // 절전이 무조건 3초 안에 풀렸다("여전히 켜짐" 로그로 확정). isNull()로
+                // JSON null을 먼저 걸러내야 한다.
+                val command = if (json.isNull("command")) "" else json.optString("command", "")
+                android.util.Log.d("HubOneSleep", "poll received command='$command' token=$commandToken id=$commandId screenOn=$screenOn")
                 if (command.isBlank()) return@Thread
 
                 // command_token은 서버가 FIFO 대기열 + ACK로 명령을 관리하는 식별자다 —
@@ -208,11 +230,78 @@ class CommandPollService : Service() {
     }
 
     private fun applyCommand(command: String): Pair<Boolean, String> {
+        // sleep을 뺀 나머지 모든 명령은 화면을 먼저 깨운다 — open_contact/wake는
+        // MainActivity의 setShowWhenLocked/setTurnScreenOn으로 어차피 켜지지만,
+        // return_to_dentweb은 우리 앱이 아닌 남의 앱을 실행하는 거라 그 앱이 스스로
+        // 화면을 켜준다는 보장이 없다(실제 지적 사항: "덴트웹이나 외국인 접수만
+        // 눌러도 꺼진 상태면 자동으로 켜지겠죠?" — 모든 명령에서 똑같이 보장하려면
+        // 여기서 공통으로 깨워야 한다).
+        if (command != "sleep") wakeScreenBriefly()
         return when (command) {
             "open_contact" -> bringMainActivityToFront(CommandPollState.SCREEN_CONTACT)
             "open_reservation" -> bringMainActivityToFront(CommandPollState.SCREEN_RESERVATION)
             "return_to_dentweb" -> launchDentWeb()
+            "sleep" -> sleepDevice()
+            "wake" -> bringMainActivityToFront(CommandPollState.SCREEN_CONTACT)
             else -> false to "알 수 없는 명령입니다: $command"
+        }
+    }
+
+    // WAKE_LOCK 권한(이미 선언돼 있음)만으로 되는 화면 깨우기 — SCREEN_BRIGHT_WAKE_LOCK +
+    // ACQUIRE_CAUSES_WAKEUP은 최신 API에서 deprecated이지만, "서비스에서 화면을 즉시
+    // 켠다"는 목적에 맞는 대체 API가 따로 없어 그대로 쓴다. 10초 뒤 자동 해제되도록
+    // 타임아웃을 줘서(acquire(ms)) 혹시 release()를 놓쳐도 화면이 계속 켜진 채로
+    // 남는 배터리 문제를 방지한다.
+    @Suppress("DEPRECATION")
+    private fun wakeScreenBriefly() {
+        android.util.Log.w("HubOneSleep", "wakeScreenBriefly() called — screen will turn on now")
+        try {
+            val pm = getSystemService(PowerManager::class.java) ?: return
+            val wakeLock = pm.newWakeLock(
+                PowerManager.SCREEN_BRIGHT_WAKE_LOCK or
+                    PowerManager.ACQUIRE_CAUSES_WAKEUP or
+                    PowerManager.ON_AFTER_RELEASE,
+                "HuBoneAgent:CommandWake"
+            )
+            wakeLock.acquire(10_000)
+            wakeLock.release()
+        } catch (_: Exception) {
+            // 화면 깨우기는 부가 기능이라 실패해도 명령 자체(예: 덴트웹 전환)는 계속 진행한다.
+        }
+    }
+
+    // 절전(sleep) — 기기 관리자(HubOneDeviceAdminReceiver)가 활성화돼 있어야 한다.
+    // 관리자 설정에서 "절전 명령 허용" 버튼으로 한 번 켜두면 된다.
+    private fun sleepDevice(): Pair<Boolean, String> {
+        val dpm = getSystemService(android.app.admin.DevicePolicyManager::class.java)
+            ?: return false to "DevicePolicyManager를 가져올 수 없습니다."
+        val admin = android.content.ComponentName(this, HubOneDeviceAdminReceiver::class.java)
+        if (!dpm.isAdminActive(admin)) {
+            return false to "기기 관리자 권한이 없습니다 — 태블릿 관리자 설정에서 \"절전 명령 허용\"을 먼저 켜주세요."
+        }
+        // "화면 항상 켜짐"(config.keepScreenOn, 기본 true) 설정이 FLAG_KEEP_SCREEN_ON으로
+        // MainActivity 창에 걸려 있으면 lockNow()와 정면 충돌해서 화면이 곧바로 다시
+        // 켜졌다(실제 겪은 문제: "절전 눌러도 잠금화면이 꺼졌다가 다시 켜짐"). 절전 직전에
+        // 꺼둔다 — 다시 깨어날 때 MainActivity.wakeScreenTransiently()가 복원한다.
+        // UI 스레드 작업이라 메인 스레드에 올리되, lockNow()보다 먼저 반드시 끝나야 하므로
+        // CountDownLatch로 완료를 기다린다(이 함수 자체는 백그라운드 스레드에서 실행됨).
+        MainActivity.activeInstance?.let { activity ->
+            val latch = java.util.concurrent.CountDownLatch(1)
+            Handler(Looper.getMainLooper()).post {
+                try { activity.clearKeepScreenOnForSleep() } finally { latch.countDown() }
+            }
+            try { latch.await(1, java.util.concurrent.TimeUnit.SECONDS) } catch (_: InterruptedException) { /* 무시 */ }
+        }
+        // 광고 오버레이 무동작 타이머가 이미 돌고 있었다면(덴트웹을 보다가 바로 절전을
+        // 누른 경우) 몇 초 뒤 타이머가 만료되며 오버레이를 띄우면서 화면을 다시 깨울 수
+        // 있다 — 절전 직전에 멈춘다(다음 폴링에서 여전히 덴트웹이면 처음부터 다시 잰다).
+        adOverlayManager.pauseIdleTimerForSleep()
+        return try {
+            android.util.Log.w("HubOneSleep", "calling dpm.lockNow() now, activeInstance=${MainActivity.activeInstance != null}")
+            dpm.lockNow()
+            true to "절전 모드로 전환했습니다."
+        } catch (e: Exception) {
+            false to "절전 전환 실패: ${e.javaClass.simpleName}: ${e.message ?: "unknown"}"
         }
     }
 
@@ -245,6 +334,30 @@ class CommandPollService : Service() {
         val pkg = config.dentwebPackage.trim()
         if (pkg.isBlank()) {
             return false to "덴트웹 앱 패키지명이 설정되지 않았습니다."
+        }
+        // 잠금화면 상태면 덴트웹(남의 앱)을 직접 띄워도 잠금화면 위로 올라오지 못한다
+        // (우리처럼 setShowWhenLocked를 걸 수 있는 건 우리 액티비티뿐) — 실제 겪은 문제:
+        // "잠금화면 상태에서 덴트웹 눌러도 잠금화면 해제는 안됨". 이 경우 MainActivity를
+        // 먼저 잠금화면 위로 띄운 뒤(wakeScreenTransiently) 이어서 덴트웹을 실행한다.
+        // 평소(잠금 아님)에는 그대로 직접 실행 — /pt 화면이 잠깐 스칠 필요가 없다.
+        val keyguard = getSystemService(android.app.KeyguardManager::class.java)
+        if (keyguard?.isKeyguardLocked == true) {
+            val intent = Intent(this, MainActivity::class.java).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
+                // 실제 겪은 버그: EXTRA_THEN_LAUNCH_DENTWEB만 넣고 EXTRA_SCREEN_COMMAND를
+                // 안 넣어서 wakeScreenTransiently()(진짜 잠금해제)가 안 불렸다 — MainActivity가
+                // 앞에는 나왔지만 잠금은 그대로라 이어지는 덴트웹 실행이 막혀서 /pt 대기화면
+                // 에서 멈췄다("덴트웹 누르면 대기화면 상태, /pt만 하면 괜찮음"). 값 자체는
+                // 아무 의미 없고 wakeScreenTransiently()를 트리거하는 용도.
+                putExtra(MainActivity.EXTRA_SCREEN_COMMAND, CommandPollState.SCREEN_CONTACT)
+                putExtra(MainActivity.EXTRA_THEN_LAUNCH_DENTWEB, true)
+            }
+            return try {
+                startActivity(intent)
+                true to "잠금화면 위로 전환 후 덴트웹 앱을 실행합니다."
+            } catch (e: Exception) {
+                false to "잠금화면에서 포커스 전환 실패: ${e.javaClass.simpleName}: ${e.message ?: "unknown"}"
+            }
         }
         val intent = try {
             packageManager.getLaunchIntentForPackage(pkg)

@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  기기 관리자(Device Admin) 정책 선언 — 딱 하나(force-lock)만 요청한다. 이건 기기
+  전체를 관리하는 "기기 소유자(Device Owner, MDM급, 재설정 필요)"가 아니라, 설정
+  화면에서 사용자가 버튼 하나로 승인/해제할 수 있는 훨씬 가벼운 권한이다.
+  실제 요청 사항: "태블릿에 sleep모드로 가는 명령을 줄 수 있는지" —
+  DevicePolicyManager.lockNow()로 즉시 화면 꺼짐+잠금을 시키는 데만 쓴다.
+-->
+<device-admin xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-policies>
+        <force-lock />
+    </uses-policies>
+</device-admin>

@@ -4,6 +4,7 @@ import android.Manifest
 import android.annotation.SuppressLint
 import android.app.Activity
 import android.app.AppOpsManager
+import android.app.KeyguardManager
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
@@ -16,7 +17,10 @@ import android.graphics.Path
 import android.graphics.RectF
 import android.media.MediaRecorder
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.os.Process
 import android.provider.Settings
 import android.util.Base64
@@ -37,6 +41,7 @@ import android.widget.Button
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.TextView
+import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
@@ -100,11 +105,25 @@ class MainActivity : Activity(), LifecycleOwner {
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        activeInstance = this
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_CREATE)
         requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
         enterImmersiveMode()
         config = AgentConfig.load(this)
         applyScreenPolicy()
+        // "wake"/open_contact/open_reservation 명령으로 불려나온 경우에만 화면을 깨운다
+        // — 실제 겪은 문제: 이 플래그를 계속 켜둔 채로 두면(이전 구현) MainActivity 창이
+        // 살아있는 한 sleep으로 화면을 꺼도 시스템이 곧바로 다시 켜버려서 "절전 누르면
+        // 꺼졌다가 도로 켜짐" 버그가 났다. wakeScreenTransiently()가 필요한 순간에만
+        // 켰다가 짧게 켠 뒤 스스로 꺼서, 다음 sleep 명령을 방해하지 않는다. config가
+        // 로드된 뒤에 불러야 한다(wakeScreenTransiently가 applyScreenPolicy를 다시
+        // 호출하는데, config가 lateinit이라 그 전에 부르면 초기화 예외가 난다).
+        if (intent?.getStringExtra(EXTRA_SCREEN_COMMAND) != null) {
+            wakeScreenTransiently()
+        }
+        if (intent?.getBooleanExtra(EXTRA_THEN_LAUNCH_DENTWEB, false) == true) {
+            launchDentWebAfterResume()
+        }
 
         webView = WebView(this).apply {
             settings.javaScriptEnabled = true
@@ -116,6 +135,7 @@ class MainActivity : Activity(), LifecycleOwner {
             CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
             addJavascriptInterface(AudioBridge(), "HubOneAudio")
             addJavascriptInterface(CameraBridge(), "HubOneCamera")
+            addJavascriptInterface(NavBridge(), "HubOneNav")
             webViewClient = SafeWebViewClient()
             webChromeClient = object : WebChromeClient() {
                 override fun onShowFileChooser(
@@ -174,7 +194,14 @@ class MainActivity : Activity(), LifecycleOwner {
         root.addView(webView, FrameLayout.LayoutParams(-1, -1))
         root.addView(buildCameraOverlay(), FrameLayout.LayoutParams(0, 0))
         root.addView(errorView, FrameLayout.LayoutParams(-1, -1))
-        root.addView(buildCornerTrigger(), FrameLayout.LayoutParams(140, 140, Gravity.TOP or Gravity.END))
+        // 몰입 모드(SYSTEM_UI_FLAG_IMMERSIVE_STICKY)에서는 화면 맨 위 가장자리를 누르면
+        // 시스템이 "숨겨진 상태바 다시 보이기" 제스처로 먼저 가로채서, 트리거가 정확히
+        // 위쪽 가장자리에 붙어있으면 5초 누르기가 시작조차 안 될 수 있다(실제 겪은 문제:
+        // "5초간 누르면 된다는데 안 됨"). 위쪽 가장자리에서 살짝 띄우고 히트박스도 키운다.
+        root.addView(
+            buildCornerTrigger(),
+            FrameLayout.LayoutParams(260, 260, Gravity.TOP or Gravity.END).apply { topMargin = 160 }
+        )
         setContentView(root)
         if (needsPermissionSetup()) {
             startActivity(Intent(this, SettingsActivity::class.java))
@@ -193,9 +220,93 @@ class MainActivity : Activity(), LifecycleOwner {
     override fun onNewIntent(newIntent: Intent) {
         super.onNewIntent(newIntent)
         setIntent(newIntent)
+        // singleTask라 이미 떠 있는 상태에서 명령이 오면 onCreate가 아니라 여기로
+        // 들어온다 — wake/open_contact/open_reservation 명령이면 여기서도 화면을 깨워야
+        // 한다(실제 겪은 문제와 동일한 이유로, 필요할 때만 짧게).
+        if (newIntent.getStringExtra(EXTRA_SCREEN_COMMAND) != null) {
+            wakeScreenTransiently()
+        }
+        if (newIntent.getBooleanExtra(EXTRA_THEN_LAUNCH_DENTWEB, false)) {
+            launchDentWebAfterResume()
+        }
         if (::webView.isInitialized) {
             applyScreenExtra(newIntent)
             loadConfiguredPage()
+        }
+    }
+
+    // "덴트웹" 명령이 왔을 때 화면이 잠겨있으면(잠금화면 위에 덴트웹을 바로 띄울 방법이
+    // 없음 — 남의 앱이라 우리처럼 setShowWhenLocked를 걸 수 없다), CommandPollService가
+    // 이 액티비티부터 잠금화면 위로 띄운 다음(wakeScreenTransiently) 여기서 이어서
+    // 덴트웹을 실행한다 — 실제 겪은 문제: "잠금화면 상태에서 덴트웹 눌러도 잠금화면
+    // 해제는 안됨". 우리 창이 실제로 잠금화면 위에 떠서 화면이 인터랙티브해진 뒤에
+    // 실행해야 하므로 약간의 지연을 둔다.
+    private fun launchDentWebAfterResume() {
+        Handler(Looper.getMainLooper()).postDelayed({
+            val pkg = AgentConfig.load(this).dentwebPackage.trim()
+            if (pkg.isBlank()) return@postDelayed
+            val launchIntent = try { packageManager.getLaunchIntentForPackage(pkg) } catch (_: Exception) { null }
+            if (launchIntent == null) return@postDelayed
+            launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
+            try {
+                startActivity(launchIntent)
+                CommandPollState.currentScreen = CommandPollState.SCREEN_DENTWEB
+            } catch (_: Exception) {
+                // 실패해도 최소한 우리 화면(/pt)은 잠금화면 위에 떠 있으니 조작은 가능하다.
+            }
+        }, 400)
+    }
+
+    // 화면을 깨우고 잠금을 실제로 해제한다 — 실제 겪은 문제 두 가지를 순서대로 고친
+    // 결과다: (1) 이 플래그를 계속 켜둔 채로 두면 sleep(lockNow())과 충돌해서 절전이
+    // 곧바로 풀렸다 → 일정 시간 뒤 자동으로 끄도록 고쳤더니, (2) "잠깐 보여주기"만 하고
+    // 진짜 잠금해제는 안 한 채로 그 타이머가 꺼버려서 몇 초 뒤 잠금화면이 다시 올라와
+    // "화면 나왔다가 대기화면으로 넘어감" 버그가 났다. requestDismissKeyguard()로 실제
+    // 잠금해제까지 하고, 그 콜백이 끝난 뒤에만 정리한다 — 고정 타이머로 추측하지 않는다.
+    private fun wakeScreenTransiently() {
+        // CommandPollService.sleepDevice()가 절전 직전에 FLAG_KEEP_SCREEN_ON을 꺼뒀을 수
+        // 있다("화면 항상 켜짐" 설정이 절전과 충돌하던 문제) — 다시 깨어나는 시점에
+        // config대로 복원한다.
+        applyScreenPolicy()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+            setShowWhenLocked(true)
+            setTurnScreenOn(true)
+        } else {
+            @Suppress("DEPRECATION")
+            window.addFlags(
+                WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
+                    WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON or
+                    WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
+            )
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val keyguard = getSystemService(KeyguardManager::class.java)
+            // 태블릿에 PIN/패턴 등 보안 잠금이 없는 키오스크 구성을 전제로 한다 — 그
+            // 경우 사용자 조작 없이 바로 해제된다. 보안 잠금이 있으면 시스템이 알아서
+            // 잠금해제 UI를 띄운다(우리가 대신 뚫을 방법은 없다 — 정상적인 보안 동작).
+            keyguard?.requestDismissKeyguard(this, object : KeyguardManager.KeyguardDismissCallback() {
+                override fun onDismissSucceeded() { clearTransientWakeFlags() }
+                override fun onDismissError() { clearTransientWakeFlags() }
+                override fun onDismissCancelled() { clearTransientWakeFlags() }
+            })
+        } else {
+            // API 26 미만은 requestDismissKeyguard가 없다 — 5초 뒤 정리(이 앱 minSdk가
+            // 29라 사실상 도달하지 않는 경로).
+            Handler(Looper.getMainLooper()).postDelayed({ clearTransientWakeFlags() }, 5_000)
+        }
+    }
+
+    private fun clearTransientWakeFlags() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+            setShowWhenLocked(false)
+            setTurnScreenOn(false)
+        } else {
+            @Suppress("DEPRECATION")
+            window.clearFlags(
+                WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
+                    WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON or
+                    WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
+            )
         }
     }
 
@@ -245,6 +356,7 @@ class MainActivity : Activity(), LifecycleOwner {
 
     override fun onDestroy() {
         super.onDestroy()
+        if (activeInstance === this) activeInstance = null
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_DESTROY)
     }
 
@@ -279,7 +391,12 @@ class MainActivity : Activity(), LifecycleOwner {
             }
         }
         val preview = PreviewView(this).apply {
-            implementationMode = PreviewView.ImplementationMode.PERFORMANCE
+            // PERFORMANCE 모드는 SurfaceView로 렌더링되는데, SurfaceView는 별도
+            // 하드웨어 레이어로 합성되어 일부 기기(특히 이 안드로이드 원 태블릿)에서
+            // View.scaleX 같은 일반 View 트랜스폼이 화면에 반영되지 않는다 — 전면
+            // 카메라 좌우반전(scaleX=-1f)이 안 먹히던 실제 원인. COMPATIBLE 모드는
+            // TextureView로 렌더링되어 일반 View 트랜스폼 파이프라인을 그대로 탄다.
+            implementationMode = PreviewView.ImplementationMode.COMPATIBLE
             scaleType = PreviewView.ScaleType.FILL_CENTER
         }
         val guide = CameraGuideOverlayView(this)
@@ -416,6 +533,15 @@ class MainActivity : Activity(), LifecycleOwner {
         else window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
     }
 
+    // CommandPollService.sleepDevice()가 lockNow() 직전에 호출한다 — "화면 항상 켜짐"
+    // 설정(config.keepScreenOn, 기본 true)이 FLAG_KEEP_SCREEN_ON으로 켜져 있으면
+    // 절전(lockNow)과 정면 충돌해서 화면이 곧바로 다시 켜졌다(실제 겪은 문제: "절전
+    // 눌러도 잠금화면이 꺼졌다가 다시 켜짐"). 다시 깨어날 때는 wakeScreenTransiently()가
+    // applyScreenPolicy()를 다시 호출해 config대로 복원한다.
+    fun clearKeepScreenOnForSleep() {
+        try { window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON) } catch (_: Exception) { /* 무시 */ }
+    }
+
     private fun enterImmersiveMode() {
         window.decorView.systemUiVisibility = (View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
             or View.SYSTEM_UI_FLAG_FULLSCREEN or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
@@ -500,14 +626,20 @@ class MainActivity : Activity(), LifecycleOwner {
             }
         }
 
+        // mode: "reservation"(/pt/reserve, 기존 동작 — sessionId 사용) |
+        // "contact"(/pt, 신규 — screenId를 sessionId 자리에 넘겨받는다). 페이지 쪽
+        // (foreign_reservation_intake.html / foreign_contact_intake.html) 둘 다
+        // 이 세 번째 인자를 명시적으로 넘긴다.
         @JavascriptInterface
-        fun stopAndUpload(sessionId: String, language: String) {
+        fun stopAndUpload(sessionId: String, language: String, mode: String) {
+            android.util.Log.d("HubOneVoice", "stopAndUpload called sessionId=$sessionId mode=$mode")
             runOnUiThread {
                 val recorder = nativeMediaRecorder
                 val file = nativeRecordingFile
                 nativeMediaRecorder = null
                 nativeRecordingFile = null
                 if (recorder == null || file == null) {
+                    android.util.Log.w("HubOneVoice", "stopAndUpload: not_recording (recorder or file null)")
                     notifyJsAudioEvent("upload_error", "not_recording")
                     return@runOnUiThread
                 }
@@ -515,16 +647,56 @@ class MainActivity : Activity(), LifecycleOwner {
                     recorder.stop()
                     recorder.release()
                 } catch (e: Exception) {
+                    android.util.Log.e("HubOneVoice", "recorder.stop() failed: ${e.message}", e)
                     notifyJsAudioEvent("upload_error", e.message ?: "stop_failed")
                     return@runOnUiThread
                 }
+                android.util.Log.d("HubOneVoice", "recorder stopped, file=${file.absolutePath} size=${file.length()} — starting upload thread")
                 Thread {
-                    val (ok, message) = uploadVoiceFile(sessionId, language, file)
+                    val (ok, message) = uploadVoiceFile(sessionId, language, file, mode)
+                    android.util.Log.d("HubOneVoice", "upload thread finished ok=$ok message=$message")
                     file.delete()
                     runOnUiThread { notifyJsAudioEvent(if (ok) "uploaded" else "upload_error", message) }
                 }.start()
             }
         }
+    }
+
+    // 페이지(foreign_contact_intake.html의 "내국인이신가요?" 버튼)가 window.HubOneNav로
+    // 호출하는 네이티브 브릿지 — 태블릿 자체를 덴트웹 고객용 앱으로 전환한다.
+    // CommandPollService.launchDentWeb()(서버가 미는 return_to_dentweb 명령용)과 로직은
+    // 같지만, 이쪽은 환자가 웹뷰에서 직접 누른 즉시 반응이라 서버 왕복이 필요 없다.
+    private inner class NavBridge {
+        @JavascriptInterface
+        fun launchDentWeb() {
+            runOnUiThread {
+                val pkg = config.dentwebPackage.trim()
+                if (pkg.isBlank()) {
+                    notifyJsNavEvent("error", "덴트웹 앱 패키지명이 설정되지 않았습니다.")
+                    return@runOnUiThread
+                }
+                val intent = try {
+                    packageManager.getLaunchIntentForPackage(pkg)
+                } catch (_: Exception) { null }
+                if (intent == null) {
+                    notifyJsNavEvent("error", "덴트웹 앱을 찾을 수 없습니다: $pkg")
+                    return@runOnUiThread
+                }
+                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
+                try {
+                    startActivity(intent)
+                    CommandPollState.currentScreen = CommandPollState.SCREEN_DENTWEB
+                    notifyJsNavEvent("launched", "")
+                } catch (e: Exception) {
+                    notifyJsNavEvent("error", "덴트웹 앱 실행 실패: ${e.javaClass.simpleName}: ${e.message ?: "unknown"}")
+                }
+            }
+        }
+    }
+
+    private fun notifyJsNavEvent(status: String, message: String) {
+        val js = "window.__hubOneNavEvent && window.__hubOneNavEvent(${JSONObject.quote(status)}, ${JSONObject.quote(message)});"
+        webView.evaluateJavascript(js, null)
     }
 
     private fun startNativeRecordingInternal() {
@@ -635,6 +807,10 @@ class MainActivity : Activity(), LifecycleOwner {
         val container = cameraOverlayContainer ?: return
         val preview = cameraPreviewView ?: return
         positionCameraOverlay(x, y, width, height)
+        // 전면 카메라 라이브 프리뷰를 거울처럼 반전해봤지만, 반전된 화면으로는
+        // 오히려 실제 카메라 방향과 안 맞아 신분증에 맞추기 더 어렵다는 피드백으로
+        // 되돌렸다(preview.scaleX 반전 제거). 촬영 후 확인화면만 웹 쪽에서 반전한다.
+        preview.scaleX = 1f
         container.visibility = View.VISIBLE
         val providerFuture = ProcessCameraProvider.getInstance(this)
         providerFuture.addListener({
@@ -652,9 +828,27 @@ class MainActivity : Activity(), LifecycleOwner {
                 val fallbackSelector = if (cameraFacing == CameraSelector.LENS_FACING_FRONT)
                     CameraSelector.DEFAULT_BACK_CAMERA else CameraSelector.DEFAULT_FRONT_CAMERA
                 val selector = if (provider.hasCamera(preferredSelector)) preferredSelector else fallbackSelector
-                provider.bindToLifecycle(this, selector, previewUseCase, captureUseCase)
+                val camera: Camera = provider.bindToLifecycle(this, selector, previewUseCase, captureUseCase)
                 imageCapture = captureUseCase
-                notifyJsCameraEvent("preview_started", "")
+                // 전면 카메라는 신분증 전체를 안내선 안에 채우려면 너무 가까이 대야 해서
+                // 초점이 안 맞는 문제가 실제로 있었다 — 프리뷰를 2배 줌해서 같은 화면 채움
+                // 정도를 유지하면서 카메라와의 거리는 초점이 맞는 범위로 더 벌릴 수 있게
+                // 한다. 후면 카메라는 이미 초점 거리가 넉넉해 이 문제가 없고, 오히려 화각이
+                // 좁아져 안내선 안에 다 못 담는 문제가 생기므로 1배(줌 없음)를 유지한다
+                // (실제 지적 사항). 기기가 지원하는 최대 줌보다 크게 요청하면 조용히
+                // 실패하므로 상한을 맞춘다.
+                if (cameraFacing == CameraSelector.LENS_FACING_FRONT) {
+                    try {
+                        val maxZoom = camera.cameraInfo.zoomState.value?.maxZoomRatio ?: 1f
+                        if (maxZoom > 1f) camera.cameraControl.setZoomRatio(minOf(2f, maxZoom))
+                    } catch (_: Exception) {
+                        // 줌 미지원 기기 — 촬영 자체는 그대로 진행한다.
+                    }
+                }
+                notifyJsCameraEvent(
+                    "preview_started",
+                    if (cameraFacing == CameraSelector.LENS_FACING_FRONT) "front" else "back"
+                )
             } catch (e: Exception) {
                 container.visibility = View.GONE
                 notifyJsCameraEvent("preview_error", e.message ?: "camera_bind_failed")
@@ -681,7 +875,14 @@ class MainActivity : Activity(), LifecycleOwner {
         capture.takePicture(ContextCompat.getMainExecutor(this), object : ImageCapture.OnImageCapturedCallback() {
             override fun onCaptureSuccess(image: ImageProxy) {
                 try {
-                    notifyJsCameraEvent("captured", imageProxyToJpegDataUrl(image))
+                    // 촬영 순간의 실제 선택 방향을 사진과 함께 넘긴다. WebView 쪽에서
+                    // 이전 preview 이벤트 상태에 의존하지 않고 환자용 미리보기를 확실히
+                    // 좌우반전할 수 있다.
+                    val payload = JSONObject().apply {
+                        put("image", imageProxyToJpegDataUrl(image))
+                        put("facing", if (cameraFacing == CameraSelector.LENS_FACING_FRONT) "front" else "back")
+                    }.toString()
+                    notifyJsCameraEvent("captured", payload)
                 } catch (e: Exception) {
                     notifyJsCameraEvent("capture_error", e.message ?: "encode_failed")
                 } finally {
@@ -754,25 +955,53 @@ class MainActivity : Activity(), LifecycleOwner {
         }
     }
 
-    // 세션 API에 직접 멀티파트 업로드한다 — deskchat/api/foreign_reservation.py의
-    // POST .../voice/transcribe와 동일한 필드(audio, language)를 그대로 맞춘다.
-    private fun uploadVoiceFile(sessionId: String, language: String, file: File): Pair<Boolean, String> {
+    // 세션/화면 API에 직접 멀티파트 업로드한다 — deskchat/api/foreign_reservation.py와
+    // patients.py의 POST .../voice/transcribe와 동일한 필드(audio, language)를 맞춘다.
+    // mode="reservation"이면 sessionIdOrScreenId는 예약 세션 URL 경로(/pt/reserve 기존
+    // 동작), mode="contact"이면 접수 태블릿 화면(screen_id) form 필드로 보낸다(/pt 신규).
+    private fun uploadVoiceFile(sessionIdOrScreenId: String, language: String, file: File, mode: String): Pair<Boolean, String> {
+        var conn: HttpURLConnection? = null
+        // HttpURLConnection의 connectTimeout/readTimeout은 연결 수립과 응답 대기만
+        // 커버하고, 업로드(쓰기) 구간 자체가 멈추는 경우는 막아주지 않는다 — 실제 겪은
+        // 문제: 마이크 녹음 종료 후 "상담원에게 전달 중..."에서 화면이 영원히 멈춤
+        // (네트워크가 뚝 끊기지 않고 그냥 정체되면 write()가 무한 대기할 수 있음).
+        // 별도 워치독으로 일정 시간 뒤 연결을 강제로 끊어 예외를 발생시켜서 항상
+        // uploaded/upload_error 콜백이 나가도록 한다.
+        val watchdogHandler = Handler(Looper.getMainLooper())
+        val watchdog = Runnable {
+            android.util.Log.w("HubOneVoice", "upload watchdog fired — forcing disconnect")
+            try { conn?.disconnect() } catch (_: Exception) { /* 무시 */ }
+        }
         return try {
+            // URL 생성(base가 비어있거나 형식이 잘못됐으면 MalformedURLException)도 반드시
+            // 이 try 안에서 해야 한다 — 밖에서 하면 예외가 이 함수를 통째로 빠져나가
+            // 호출부(Thread{}.start())에서 안 잡히고 콜백이 영영 안 나가는 채로 스레드가
+            // 조용히 죽는다(실제 있었던 회귀 — watchdog 추가하면서 실수로 밖으로 뺐었음).
             val boundary = "----HubOneBoundary${System.currentTimeMillis()}"
             val base = config.baseUrl.trim().trimEnd('/')
-            val url = URL("$base/api/patients/foreign-reservation/session/${Uri.encode(sessionId)}/voice/transcribe")
-            val conn = (url.openConnection() as HttpURLConnection).apply {
+            val isContact = mode == "contact"
+            val url = if (isContact)
+                URL("$base/api/patients/foreign-intake/voice/transcribe")
+            else
+                URL("$base/api/patients/foreign-reservation/session/${Uri.encode(sessionIdOrScreenId)}/voice/transcribe")
+            android.util.Log.d("HubOneVoice", "upload starting url=$url fileSize=${file.length()}")
+            conn = (url.openConnection() as HttpURLConnection).apply {
                 requestMethod = "POST"
                 doOutput = true
                 connectTimeout = 5_000
                 readTimeout = 60_000
                 setRequestProperty("Content-Type", "multipart/form-data; boundary=$boundary")
             }
+            watchdogHandler.postDelayed(watchdog, UPLOAD_WATCHDOG_MS)
             conn.outputStream.use { out ->
                 fun writeText(s: String) = out.write(s.toByteArray(Charsets.UTF_8))
-                writeText("--$boundary\r\n")
-                writeText("Content-Disposition: form-data; name=\"language\"\r\n\r\n")
-                writeText("$language\r\n")
+                fun writeField(name: String, value: String) {
+                    writeText("--$boundary\r\n")
+                    writeText("Content-Disposition: form-data; name=\"$name\"\r\n\r\n")
+                    writeText("$value\r\n")
+                }
+                writeField("language", language)
+                if (isContact) writeField("screen_id", sessionIdOrScreenId)
                 writeText("--$boundary\r\n")
                 writeText("Content-Disposition: form-data; name=\"audio\"; filename=\"voice.m4a\"\r\n")
                 writeText("Content-Type: audio/mp4\r\n\r\n")
@@ -781,10 +1010,14 @@ class MainActivity : Activity(), LifecycleOwner {
                 out.flush()
             }
             val code = conn.responseCode
-            conn.disconnect()
+            android.util.Log.d("HubOneVoice", "upload response code=$code")
             if (code in 200..299) Pair(true, "") else Pair(false, "http_$code")
         } catch (e: Exception) {
+            android.util.Log.e("HubOneVoice", "upload failed: ${e.javaClass.simpleName}: ${e.message}", e)
             Pair(false, e.message ?: "upload_exception")
+        } finally {
+            watchdogHandler.removeCallbacks(watchdog)
+            try { conn?.disconnect() } catch (_: Exception) { /* 무시 */ }
         }
     }
 
@@ -819,10 +1052,25 @@ class MainActivity : Activity(), LifecycleOwner {
         private const val SCREEN_PATH_RESERVATION = "/pt/reserve"
         private const val RECORD_AUDIO_PERMISSION_REQUEST = 20
         private const val CAMERA_PREVIEW_PERMISSION_REQUEST = 21
+        // 음성 업로드 워치독 — connectTimeout/readTimeout이 커버 못 하는 "쓰기 중 정체"
+        // 상황에서도 이 시간 안에는 반드시 강제로 끊어서 uploaded/upload_error 콜백이
+        // 나가도록 한다(실제 겪은 문제: "상담원에게 전달 중..."에서 무한 대기).
+        private const val UPLOAD_WATCHDOG_MS = 45_000L
 
         // CommandPollService가 MainActivity를 강제로 앞에 가져올 때(덴트웹 등에서 복귀)
         // 어느 화면을 띄울지 실어 보내는 Intent extra 키 — CommandPollState.SCREEN_CONTACT/
         // SCREEN_RESERVATION 값을 그대로 담는다.
         const val EXTRA_SCREEN_COMMAND = "screen_command"
+        // 잠금화면 상태에서 "덴트웹" 명령이 왔을 때, 이 액티비티가 잠금화면 위로 뜬 뒤
+        // 이어서 덴트웹을 실행하라는 표시 — 실제 겪은 문제: "잠금화면 상태에서 덴트웹
+        // 눌러도 잠금화면 해제는 안됨"(남의 앱은 우리처럼 잠금화면 위에 못 뜬다).
+        const val EXTRA_THEN_LAUNCH_DENTWEB = "then_launch_dentweb"
+
+        // sleep 직전에 FLAG_KEEP_SCREEN_ON을 꺼야 하는 CommandPollService, 그리고
+        // 잠금화면 상태에서 덴트웹으로 이어줘야 하는 launchDentWeb() 둘 다 살아있는
+        // MainActivity 창에 접근해야 해서 둔다 — 같은 프로세스 안이라 SharedPreferences나
+        // IPC 없이 static 참조로 충분하다(CommandPollState와 동일한 전제).
+        @Volatile
+        var activeInstance: MainActivity? = null
     }
 }

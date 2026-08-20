@@ -2,7 +2,9 @@ package com.seoulprime.huboneagent
 
 import android.app.Activity
 import android.app.AppOpsManager
+import android.app.admin.DevicePolicyManager
 import android.Manifest
+import android.content.ComponentName
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
@@ -12,6 +14,7 @@ import android.provider.Settings
 import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
+import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import java.net.HttpURLConnection
@@ -25,6 +28,8 @@ class SettingsActivity : Activity() {
     private lateinit var microphonePermissionButton: Button
     private lateinit var usagePermissionButton: Button
     private lateinit var overlayPermissionButton: Button
+    private lateinit var deviceAdminPermissionButton: Button
+    private lateinit var storagePermissionButton: Button
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -51,21 +56,30 @@ class SettingsActivity : Activity() {
         })
         baseUrl = addField(root, "HUBONE_BASE_URL", config.baseUrl)
         screenId = addField(root, "SCREEN_ID", config.screenId)
-        root.addView(TextView(this).apply {
+        // 실제 요청 사항: "덴트웹 앱 패키지명 설정은 숨기기. 변하지 않음." — 기기마다
+        // 값이 달라질 일이 실질적으로 없어서 화면에서만 숨긴다(삭제 아님, GONE) —
+        // AgentConfig에는 그대로 저장되고 필요하면 나중에 다시 보이게 할 수 있다.
+        val dentwebSection = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            visibility = android.view.View.GONE
+        }
+        dentwebSection.addView(TextView(this).apply {
             text = "덴트웹 앱 패키지명 — 기본값은 고객용 앱(kr.co.DentWeb.DentWebCustomer). 실기기 사정에 따라 다르면 adb shell pm list packages 등으로 확인 후 바꿔서 입력. 비워두면 \"덴트웹으로 전환\" 명령을 무시합니다."
             setPadding(0, 12, 0, 4)
             textSize = 13f
         })
-        dentwebPackage = addField(root, "DENTWEB_PACKAGE (예: com.example.dentweb)", config.dentwebPackage)
+        dentwebPackage = addField(dentwebSection, "DENTWEB_PACKAGE (예: com.example.dentweb)", config.dentwebPackage)
+        root.addView(dentwebSection)
 
         // 사용정보 접근(PACKAGE_USAGE_STATS)은 일반 권한창으로 못 받는 특수 권한이라
         // 시스템 설정 화면으로 직접 보내야 한다 — 허용하면 보드 탭에 덴트웹 앱이 실제
         // 전면인지 정확히 표시되고(추정치가 아니라), 허용 안 해도 앱은 정상 동작한다
         // (마지막으로 내린 명령 기준 추정치로 자동 폴백).
-        val permissionRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
+        val permissionGrid = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
             setPadding(0, 12, 0, 0)
         }
+        fun permissionRow() = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         fun permissionButton(label: String, onClick: () -> Unit): Button {
             return Button(this).apply {
                 text = label
@@ -84,10 +98,53 @@ class SettingsActivity : Activity() {
             startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")))
             Toast.makeText(this@SettingsActivity, "목록에서 HUBONE Agent를 켜주세요.", Toast.LENGTH_LONG).show()
         }
-        listOf(cameraPermissionButton, microphonePermissionButton, usagePermissionButton, overlayPermissionButton).forEach { button ->
-            permissionRow.addView(button, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = 8 })
+        // 절전(sleep) 명령(DevicePolicyManager.lockNow())을 쓰려면 기기 관리자로
+        // 활성화돼 있어야 한다 — 기기 소유자(Device Owner, 재설정 필요)와 달리 설정에서
+        // 사용자가 버튼 하나로 켜고 끌 수 있는 가벼운 권한이다. 실제 요청 사항:
+        // "태블릿에 sleep모드로 가는 명령을 줄 수 있는지".
+        deviceAdminPermissionButton = permissionButton("절전 명령\n허용") {
+            if (isDeviceAdminActive()) {
+                Toast.makeText(this@SettingsActivity, "이미 허용되어 있습니다.", Toast.LENGTH_SHORT).show()
+                return@permissionButton
+            }
+            val intent = Intent(DevicePolicyManager.ACTION_ADD_DEVICE_ADMIN).apply {
+                putExtra(DevicePolicyManager.EXTRA_DEVICE_ADMIN, deviceAdminComponent())
+                putExtra(
+                    DevicePolicyManager.EXTRA_ADD_EXPLANATION,
+                    "허브원 콘솔에서 태블릿을 절전(화면 꺼짐+잠금) 시키는 명령을 쓰려면 필요합니다."
+                )
+            }
+            startActivity(intent)
         }
-        root.addView(permissionRow)
+        // 태블릿 이름(SCREEN_ID) 등 설정을 앱 재설치와 무관한 외부 저장소에도 백업해두는
+        // AgentConfig.saveDurableBackup()이 쓰려면 필요 — 실제 겪은 문제: "재빌드/재설치할
+        // 때마다 태블릿 이름을 매번 다시 설정해야 함". Android 11+는 일반 런타임 권한창이
+        // 아니라 앱별 전체 파일 접근 설정 화면으로 보내야 한다.
+        storagePermissionButton = permissionButton("설정 백업\n저장소 허용") {
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+                try {
+                    startActivity(Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, Uri.parse("package:$packageName")))
+                } catch (_: Exception) {
+                    startActivity(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION))
+                }
+            } else {
+                // Android 10 이하는 일반 런타임 권한창으로 충분하다(범위저장소 예외 대상).
+                requestRuntimePermission(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+            }
+        }
+        // 실제 겪은 문제: "절전 관련 설정 버튼이 안 보임" — 한 줄에 다 욱여넣으면(이제 6개)
+        // 화면 밖으로 밀려 잘려 보일 수 있어 두 줄로 나눈다. 각 행은 MATCH_PARENT로 명시해야
+        // weight=1f가 실제로 화면 폭 기준으로 균등 분배된다(WRAP_CONTENT 부모면 무의미해짐).
+        val permRowParams = { LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT) }
+        fun fillRow(row: LinearLayout, buttons: List<Button>) {
+            buttons.forEach { button ->
+                row.addView(button, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = 8 })
+            }
+            permissionGrid.addView(row, permRowParams())
+        }
+        fillRow(permissionRow(), listOf(cameraPermissionButton, microphonePermissionButton, usagePermissionButton))
+        fillRow(permissionRow(), listOf(overlayPermissionButton, deviceAdminPermissionButton, storagePermissionButton))
+        root.addView(permissionGrid, permRowParams())
         root.addView(TextView(this).apply {
             text = "허용하면 허브원 보드 탭에서 덴트웹 환자용 앱이 실제 전면인지 정확히 표시합니다. 허용 안 해도 동작은 하되 추정치로만 표시됩니다."
             textSize = 12f
@@ -125,20 +182,23 @@ class SettingsActivity : Activity() {
                 marginEnd = if (row.childCount > 0) 12 else 0
             })
         }
+        // 실제 요청 사항: "연결테스트 등 버튼 3컬럼 배열해도 됨" — 2열 3행 대신 3열 2행으로.
+        val rowLayoutParams = { LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT) }
         val row1 = buttonRow()
         addButton(row1, "연결 테스트") { testConnection() }
         addButton(row1, "자동 검색") { discoverServer() }
-        buttonsGrid.addView(row1)
+        addButton(row1, "현재 URL 열기") { save(); openMain() }
+        buttonsGrid.addView(row1, rowLayoutParams())
         val row2 = buttonRow()
-        addButton(row2, "현재 URL 열기") { save(); openMain() }
         addButton(row2, "앱 재시작") { save(); openMain() }
-        buttonsGrid.addView(row2)
-        val row3 = buttonRow()
-        addButton(row3, "기본값 복원") { restoreDefaults() }
-        addButton(row3, "저장") { save(); finish() }
-        buttonsGrid.addView(row3)
-        root.addView(buttonsGrid)
-        setContentView(root)
+        addButton(row2, "기본값 복원") { restoreDefaults() }
+        addButton(row2, "저장") { save(); finish() }
+        buttonsGrid.addView(row2, rowLayoutParams())
+        root.addView(buttonsGrid, rowLayoutParams())
+        // 오늘 하루에도 버튼/설명이 계속 늘어서(카메라·마이크·전면앱확인·화면위표시·절전명령
+        // 5개 권한 버튼 + 6개 동작 버튼) 세로 길이가 화면을 넘어설 수 있다 — ScrollView로
+        // 감싸서 아래쪽 버튼이 화면 밖으로 잘리지 않게 방어적으로 처리한다.
+        setContentView(ScrollView(this).apply { addView(root) })
         refreshPermissionButtons()
     }
 
@@ -160,6 +220,16 @@ class SettingsActivity : Activity() {
         microphonePermissionButton.text = runtimePermissionLabel("마이크", Manifest.permission.RECORD_AUDIO)
         usagePermissionButton.text = if (hasUsageAccess()) "전면 앱 확인\n✓ 허용됨" else "전면 앱 확인\n허용"
         overlayPermissionButton.text = if (Settings.canDrawOverlays(this)) "화면 위 표시\n✓ 허용됨" else "화면 위 표시\n허용"
+        deviceAdminPermissionButton.text = if (isDeviceAdminActive()) "절전 명령\n✓ 허용됨" else "절전 명령\n허용"
+        storagePermissionButton.text = if (hasStorageAccess()) "설정 백업\n✓ 허용됨" else "설정 백업\n저장소 허용"
+    }
+
+    private fun deviceAdminComponent(): ComponentName =
+        ComponentName(this, HubOneDeviceAdminReceiver::class.java)
+
+    private fun isDeviceAdminActive(): Boolean {
+        val dpm = getSystemService(DevicePolicyManager::class.java) ?: return false
+        return dpm.isAdminActive(deviceAdminComponent())
     }
 
     private fun runtimePermissionLabel(name: String, permission: String): String {
@@ -169,6 +239,14 @@ class SettingsActivity : Activity() {
     private fun hasUsageAccess(): Boolean {
         val appOps = getSystemService(AppOpsManager::class.java)
         return appOps?.checkOpNoThrow(AppOpsManager.OPSTR_GET_USAGE_STATS, Process.myUid(), packageName) == AppOpsManager.MODE_ALLOWED
+    }
+
+    private fun hasStorageAccess(): Boolean {
+        return if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+            android.os.Environment.isExternalStorageManager()
+        } else {
+            checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
+        }
     }
 
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
@@ -241,9 +319,13 @@ class SettingsActivity : Activity() {
                 connection.readTimeout = 5_000
                 val code = connection.responseCode
                 connection.disconnect()
-                "연결 응답: HTTP $code"
+                if (code in 200..299) {
+                    "서버 연결이 정상입니다."
+                } else {
+                    "서버에 연결하지 못했습니다. (응답 코드: $code)"
+                }
             } catch (_: Exception) {
-                "서버에 연결할 수 없습니다"
+                "서버에 연결할 수 없습니다. 주소와 네트워크를 확인해 주세요."
             }
             runOnUiThread { Toast.makeText(this, result, Toast.LENGTH_LONG).show() }
         }.start()
