@@ -344,6 +344,12 @@ class CommandPollService : Service() {
         if (keyguard?.isKeyguardLocked == true) {
             val intent = Intent(this, MainActivity::class.java).apply {
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
+                // 실제 겪은 버그: EXTRA_THEN_LAUNCH_DENTWEB만 넣고 EXTRA_SCREEN_COMMAND를
+                // 안 넣어서 wakeScreenTransiently()(진짜 잠금해제)가 안 불렸다 — MainActivity가
+                // 앞에는 나왔지만 잠금은 그대로라 이어지는 덴트웹 실행이 막혀서 /pt 대기화면
+                // 에서 멈췄다("덴트웹 누르면 대기화면 상태, /pt만 하면 괜찮음"). 값 자체는
+                // 아무 의미 없고 wakeScreenTransiently()를 트리거하는 용도.
+                putExtra(MainActivity.EXTRA_SCREEN_COMMAND, CommandPollState.SCREEN_CONTACT)
                 putExtra(MainActivity.EXTRA_THEN_LAUNCH_DENTWEB, true)
             }
             return try {
