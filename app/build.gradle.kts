@@ -11,8 +11,8 @@ android {
         applicationId = "com.seoulprime.huboneagent"
         minSdk = 29
         targetSdk = 35
-        versionCode = 6
-        versionName = "0.6.0-sleep-wake-ad-overlay"
+        versionCode = 7
+        versionName = "0.6.1-sleep-wake-ad-overlay"
     }
 
     buildTypes {
