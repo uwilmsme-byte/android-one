@@ -13,6 +13,7 @@ package com.seoulprime.huboneagent
 object CommandPollState {
     const val SCREEN_CONTACT = "contact"
     const val SCREEN_RESERVATION = "reservation"
+    const val SCREEN_CONSENT = "consent"
     const val SCREEN_DENTWEB = "dentweb"
 
     @Volatile

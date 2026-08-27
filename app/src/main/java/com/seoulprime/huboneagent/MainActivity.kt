@@ -311,9 +311,26 @@ class MainActivity : Activity(), LifecycleOwner {
     }
 
     private fun applyScreenExtra(source: Intent?) {
-        when (source?.getStringExtra(EXTRA_SCREEN_COMMAND)) {
-            CommandPollState.SCREEN_RESERVATION -> currentScreenPath = SCREEN_PATH_RESERVATION
-            CommandPollState.SCREEN_CONTACT -> currentScreenPath = SCREEN_PATH_CONTACT
+        val pagePath = source?.getStringExtra(EXTRA_SCREEN_PATH)?.trim().orEmpty()
+        if (pagePath.isNotBlank() && pagePath.startsWith("/") && !pagePath.startsWith("//") && !pagePath.split("/").contains("..")) {
+            currentScreenPath = pagePath
+        }
+        if (pagePath.isBlank()) {
+            when (source?.getStringExtra(EXTRA_SCREEN_COMMAND)) {
+                CommandPollState.SCREEN_RESERVATION -> currentScreenPath = SCREEN_PATH_RESERVATION
+                CommandPollState.SCREEN_CONSENT -> currentScreenPath = SCREEN_PATH_CONSENT
+                CommandPollState.SCREEN_CONTACT -> currentScreenPath = SCREEN_PATH_CONTACT
+            }
+        }
+        applyRequestedOrientation(source?.getStringExtra(EXTRA_SCREEN_ORIENTATION))
+    }
+
+    private fun applyRequestedOrientation(value: String?) {
+        when (value?.trim()?.lowercase(Locale.ROOT)) {
+            "portrait" -> requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+            "landscape" -> requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+            "sensor" -> requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_SENSOR
+            "unspecified" -> requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
         }
     }
 
@@ -328,8 +345,11 @@ class MainActivity : Activity(), LifecycleOwner {
             // 명령 없이 사용자가 수동으로 이 화면에 돌아온 경우(예: 덴트웹에서 스와이프/뒤로가기)
             // 도 여기서 바로 잡아준다 — CommandPollService는 이 반대 방향을 추측하지 않고
             // MainActivity가 실제로 보여주는 화면을 기준으로 여기서 정확히 갱신한다.
-            CommandPollState.currentScreen = if (currentScreenPath == SCREEN_PATH_RESERVATION)
-                CommandPollState.SCREEN_RESERVATION else CommandPollState.SCREEN_CONTACT
+        CommandPollState.currentScreen = when (currentScreenPath.substringBefore('?')) {
+                SCREEN_PATH_RESERVATION -> CommandPollState.SCREEN_RESERVATION
+                SCREEN_PATH_CONSENT -> CommandPollState.SCREEN_CONSENT
+                else -> CommandPollState.SCREEN_CONTACT
+            }
             val latest = AgentConfig.load(this)
             if (latest.baseUrl != config.baseUrl || latest.screenId != config.screenId) {
                 config = latest
@@ -445,11 +465,15 @@ class MainActivity : Activity(), LifecycleOwner {
         // 이 Activity가 실제로 화면을 그리는 순간을 "현재 화면 상태"의 기준으로 삼는다 —
         // CommandPollService가 명령을 보낼 때도 미리 갱신해두지만, 런처 아이콘으로 수동
         // 실행한 경우 등도 여기서 함께 반영된다(허브원 보드 탭의 상태 표시용).
-        CommandPollState.currentScreen = if (currentScreenPath == SCREEN_PATH_RESERVATION)
-            CommandPollState.SCREEN_RESERVATION else CommandPollState.SCREEN_CONTACT
+            CommandPollState.currentScreen = when (currentScreenPath.substringBefore('?')) {
+            SCREEN_PATH_RESERVATION -> CommandPollState.SCREEN_RESERVATION
+            SCREEN_PATH_CONSENT -> CommandPollState.SCREEN_CONSENT
+            else -> CommandPollState.SCREEN_CONTACT
+        }
         val base = config.baseUrl.trim().trimEnd('/')
         val screen = config.screenId.trim().ifBlank { AgentConfig.DEFAULT_SCREEN_ID }
-        val target = "$base$currentScreenPath?screen_id=${Uri.encode(screen)}"
+        val separator = if (currentScreenPath.contains("?")) "&" else "?"
+        val target = "$base$currentScreenPath${separator}screen_id=${Uri.encode(screen)}"
         val uri = Uri.parse(target)
         if (!isAllowed(uri)) {
             showError()
@@ -1050,6 +1074,7 @@ class MainActivity : Activity(), LifecycleOwner {
         private const val FILE_CHOOSER_REQUEST = 401
         private const val SCREEN_PATH_CONTACT = "/pt"
         private const val SCREEN_PATH_RESERVATION = "/pt/reserve"
+        private const val SCREEN_PATH_CONSENT = "/pt/consent"
         private const val RECORD_AUDIO_PERMISSION_REQUEST = 20
         private const val CAMERA_PREVIEW_PERMISSION_REQUEST = 21
         // 음성 업로드 워치독 — connectTimeout/readTimeout이 커버 못 하는 "쓰기 중 정체"
@@ -1061,6 +1086,8 @@ class MainActivity : Activity(), LifecycleOwner {
         // 어느 화면을 띄울지 실어 보내는 Intent extra 키 — CommandPollState.SCREEN_CONTACT/
         // SCREEN_RESERVATION 값을 그대로 담는다.
         const val EXTRA_SCREEN_COMMAND = "screen_command"
+        const val EXTRA_SCREEN_PATH = "screen_path"
+        const val EXTRA_SCREEN_ORIENTATION = "screen_orientation"
         // 잠금화면 상태에서 "덴트웹" 명령이 왔을 때, 이 액티비티가 잠금화면 위로 뜬 뒤
         // 이어서 덴트웹을 실행하라는 표시 — 실제 겪은 문제: "잠금화면 상태에서 덴트웹
         // 눌러도 잠금화면 해제는 안됨"(남의 앱은 우리처럼 잠금화면 위에 못 뜬다).

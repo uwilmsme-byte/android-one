@@ -63,7 +63,6 @@
             android:screenOrientation="landscape" />
         <activity
             android:name=".MainActivity"
-            android:screenOrientation="landscape"
             android:launchMode="singleTask"
             android:exported="true">
             <intent-filter>

@@ -204,7 +204,9 @@ class CommandPollService : Service() {
                 // 절전이 무조건 3초 안에 풀렸다("여전히 켜짐" 로그로 확정). isNull()로
                 // JSON null을 먼저 걸러내야 한다.
                 val command = if (json.isNull("command")) "" else json.optString("command", "")
-                android.util.Log.d("HubOneSleep", "poll received command='$command' token=$commandToken id=$commandId screenOn=$screenOn")
+                val pagePath = if (json.isNull("path")) "" else json.optString("path", "")
+                val orientation = if (json.isNull("orientation")) "" else json.optString("orientation", "")
+                android.util.Log.d("HubOneSleep", "poll received command='$command' path='$pagePath' orientation='$orientation' token=$commandToken id=$commandId screenOn=$screenOn")
                 if (command.isBlank()) return@Thread
 
                 // command_token은 서버가 FIFO 대기열 + ACK로 명령을 관리하는 식별자다 —
@@ -219,7 +221,7 @@ class CommandPollService : Service() {
 
                 lastAppliedCommandId = commandId
                 lastCommandToken = commandToken
-                val result = applyCommand(command)
+                val result = applyCommand(command, pagePath, orientation)
                 lastCommandResult = result
                 CommandPollState.lastStatusMessage = result.second
                 if (commandToken.isNotBlank()) reportCommandResult(screen, commandToken, command, result.first, result.second)
@@ -229,7 +231,7 @@ class CommandPollService : Service() {
         }.start()
     }
 
-    private fun applyCommand(command: String): Pair<Boolean, String> {
+    private fun applyCommand(command: String, pagePath: String = "", orientation: String = ""): Pair<Boolean, String> {
         // sleep을 뺀 나머지 모든 명령은 화면을 먼저 깨운다 — open_contact/wake는
         // MainActivity의 setShowWhenLocked/setTurnScreenOn으로 어차피 켜지지만,
         // return_to_dentweb은 우리 앱이 아닌 남의 앱을 실행하는 거라 그 앱이 스스로
@@ -238,7 +240,22 @@ class CommandPollService : Service() {
         // 여기서 공통으로 깨워야 한다).
         if (command != "sleep") wakeScreenBriefly()
         return when (command) {
+            "open_page" -> {
+                val path = pagePath.trim()
+                if (!path.startsWith("/") || path.startsWith("//") || path.split("/").contains("..")) {
+                    false to "잘못된 페이지 경로입니다."
+                } else {
+                    val screen = when (path.substringBefore('?')) {
+                        "/pt" -> CommandPollState.SCREEN_CONTACT
+                        "/pt/reserve" -> CommandPollState.SCREEN_RESERVATION
+                        "/pt/consent" -> CommandPollState.SCREEN_CONSENT
+                        else -> path
+                    }
+                    bringMainActivityToFront(screen, path, orientation)
+                }
+            }
             "open_contact" -> bringMainActivityToFront(CommandPollState.SCREEN_CONTACT)
+            "open_consent" -> bringMainActivityToFront(CommandPollState.SCREEN_CONSENT, "/pt/consent", "portrait")
             "open_reservation" -> bringMainActivityToFront(CommandPollState.SCREEN_RESERVATION)
             "return_to_dentweb" -> launchDentWeb()
             "sleep" -> sleepDevice()
@@ -309,13 +326,15 @@ class CommandPollService : Service() {
     // 이 서비스는 계속 살아있으므로, 명령을 받으면 MainActivity를 새 태스크 플래그로 강제로
     // 앞에 가져온다. MainActivity가 singleTask라 기존 인스턴스가 있으면 onNewIntent로,
     // 없으면 onCreate로 EXTRA_SCREEN_COMMAND를 받아 화면을 전환한다.
-    private fun bringMainActivityToFront(screen: String): Pair<Boolean, String> {
+    private fun bringMainActivityToFront(screen: String, path: String? = null, orientation: String? = null): Pair<Boolean, String> {
         // 실제 겪은 버그: 여기서 CommandPollState.currentScreen을 먼저 바꿔버리면, 아래
         // startActivity()가 실제로는 실패해도(백그라운드 활동 시작 제한 등) 보드에는
         // "성공한 것처럼" 상태가 찍혀서 원인을 알 수 없었다 — 성공했을 때만 갱신한다.
         val intent = Intent(this, MainActivity::class.java).apply {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
             putExtra(MainActivity.EXTRA_SCREEN_COMMAND, screen)
+            if (!path.isNullOrBlank()) putExtra(MainActivity.EXTRA_SCREEN_PATH, path)
+            if (!orientation.isNullOrBlank()) putExtra(MainActivity.EXTRA_SCREEN_ORIENTATION, orientation)
         }
         return try {
             startActivity(intent)
