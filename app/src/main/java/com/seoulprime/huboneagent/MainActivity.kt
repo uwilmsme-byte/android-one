@@ -83,6 +83,16 @@ class MainActivity : Activity(), LifecycleOwner {
     private var nativeMediaRecorder: MediaRecorder? = null
     private var nativeRecordingFile: File? = null
     private var pendingNativeAudioStart = false
+    private var pendingNativeAutoRequest: NativeAutoRequest? = null
+    private var nativeAutoRequest: NativeAutoRequest? = null
+    private val nativeVadHandler = Handler(Looper.getMainLooper())
+    private var nativeVadRunnable: Runnable? = null
+
+    private data class NativeAutoRequest(
+        val sessionId: String,
+        val language: String,
+        val mode: String,
+    )
 
     // 신분증 촬영 화면(foreign_contact_intake.html)의 네이티브 카메라 미리보기 —
     // 위 마이크와 동일한 이유(http 보안 컨텍스트)로 웹 getUserMedia(video)가 막히므로,
@@ -623,7 +633,13 @@ class MainActivity : Activity(), LifecycleOwner {
 
         if (pendingNativeAudioStart) {
             pendingNativeAudioStart = false
-            if (granted) startNativeRecordingInternal() else notifyJsAudioEvent("start_error", "permission_denied")
+            val autoRequest = pendingNativeAutoRequest
+            pendingNativeAutoRequest = null
+            if (granted) {
+                if (autoRequest != null) startNativeAutoRecordingInternal(autoRequest) else startNativeRecordingInternal()
+            } else {
+                notifyJsAudioEvent("start_error", "permission_denied")
+            }
         }
     }
 
@@ -650,6 +666,28 @@ class MainActivity : Activity(), LifecycleOwner {
             }
         }
 
+        // 통역상담 kiosk의 무조작 VAD 경로. 웹 WebView의 getUserMedia가 막힌 기기에서도
+        // 네이티브 MediaRecorder 진폭을 이용해 발화 종료를 감지하고 곧바로 업로드한다.
+        @JavascriptInterface
+        fun startAutoRecording(sessionId: String, language: String, mode: String) {
+            runOnUiThread {
+                val request = NativeAutoRequest(sessionId, language, mode)
+                if (ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.RECORD_AUDIO)
+                    != PackageManager.PERMISSION_GRANTED
+                ) {
+                    pendingNativeAudioStart = true
+                    pendingNativeAutoRequest = request
+                    ActivityCompat.requestPermissions(
+                        this@MainActivity,
+                        arrayOf(Manifest.permission.RECORD_AUDIO),
+                        RECORD_AUDIO_PERMISSION_REQUEST
+                    )
+                    return@runOnUiThread
+                }
+                startNativeAutoRecordingInternal(request)
+            }
+        }
+
         // mode: "reservation"(/pt/reserve, 기존 동작 — sessionId 사용) |
         // "contact"(/pt, 신규 — screenId를 sessionId 자리에 넘겨받는다). 페이지 쪽
         // (foreign_reservation_intake.html / foreign_contact_intake.html) 둘 다
@@ -657,32 +695,7 @@ class MainActivity : Activity(), LifecycleOwner {
         @JavascriptInterface
         fun stopAndUpload(sessionId: String, language: String, mode: String) {
             android.util.Log.d("HubOneVoice", "stopAndUpload called sessionId=$sessionId mode=$mode")
-            runOnUiThread {
-                val recorder = nativeMediaRecorder
-                val file = nativeRecordingFile
-                nativeMediaRecorder = null
-                nativeRecordingFile = null
-                if (recorder == null || file == null) {
-                    android.util.Log.w("HubOneVoice", "stopAndUpload: not_recording (recorder or file null)")
-                    notifyJsAudioEvent("upload_error", "not_recording")
-                    return@runOnUiThread
-                }
-                try {
-                    recorder.stop()
-                    recorder.release()
-                } catch (e: Exception) {
-                    android.util.Log.e("HubOneVoice", "recorder.stop() failed: ${e.message}", e)
-                    notifyJsAudioEvent("upload_error", e.message ?: "stop_failed")
-                    return@runOnUiThread
-                }
-                android.util.Log.d("HubOneVoice", "recorder stopped, file=${file.absolutePath} size=${file.length()} — starting upload thread")
-                Thread {
-                    val (ok, message) = uploadVoiceFile(sessionId, language, file, mode)
-                    android.util.Log.d("HubOneVoice", "upload thread finished ok=$ok message=$message")
-                    file.delete()
-                    runOnUiThread { notifyJsAudioEvent(if (ok) "uploaded" else "upload_error", message) }
-                }.start()
-            }
+            runOnUiThread { stopNativeRecordingAndUpload(NativeAutoRequest(sessionId, language, mode), false) }
         }
     }
 
@@ -741,6 +754,95 @@ class MainActivity : Activity(), LifecycleOwner {
             nativeRecordingFile = null
             notifyJsAudioEvent("start_error", e.message ?: "recorder_error")
         }
+    }
+
+    private fun startNativeAutoRecordingInternal(request: NativeAutoRequest) {
+        nativeAutoRequest = request
+        stopNativeVadMonitor()
+        startNativeRecordingInternal()
+        if (nativeMediaRecorder == null) return
+
+        val startedAt = System.currentTimeMillis()
+        var voicedFrames = 0
+        var hadSpeech = false
+        var silenceSince = 0L
+        val monitor = object : Runnable {
+            override fun run() {
+                val recorder = nativeMediaRecorder
+                if (recorder == null || nativeAutoRequest != request) return
+                val elapsed = System.currentTimeMillis() - startedAt
+                val amplitude = try { recorder.maxAmplitude } catch (_: Exception) { 0 }
+                if (amplitude >= NATIVE_VAD_AMPLITUDE_THRESHOLD) {
+                    voicedFrames += 1
+                    silenceSince = 0L
+                    if (voicedFrames >= 2) hadSpeech = true
+                } else if (hadSpeech) {
+                    if (silenceSince == 0L) silenceSince = System.currentTimeMillis()
+                    if (System.currentTimeMillis() - silenceSince >= NATIVE_VAD_SILENCE_MS || elapsed >= NATIVE_VAD_MAX_SPEECH_MS) {
+                        stopNativeRecordingAndUpload(request, true)
+                        return
+                    }
+                }
+                if (!hadSpeech && elapsed >= NATIVE_VAD_IDLE_MS) {
+                    discardNativeRecording("idle")
+                    return
+                }
+                nativeVadHandler.postDelayed(this, NATIVE_VAD_POLL_MS)
+            }
+        }
+        nativeVadRunnable = monitor
+        nativeVadHandler.postDelayed(monitor, NATIVE_VAD_POLL_MS)
+    }
+
+    private fun stopNativeVadMonitor() {
+        nativeVadRunnable?.let { nativeVadHandler.removeCallbacks(it) }
+        nativeVadRunnable = null
+    }
+
+    private fun discardNativeRecording(event: String) {
+        stopNativeVadMonitor()
+        val recorder = nativeMediaRecorder
+        val file = nativeRecordingFile
+        nativeMediaRecorder = null
+        nativeRecordingFile = null
+        try { recorder?.stop() } catch (_: Exception) { /* no voiced audio is expected */ }
+        try { recorder?.release() } catch (_: Exception) { /* no-op */ }
+        try { file?.delete() } catch (_: Exception) { /* no-op */ }
+        notifyJsAudioEvent(event, "")
+        nativeAutoRequest?.let { request ->
+            nativeVadHandler.postDelayed({ if (nativeAutoRequest == request) startNativeAutoRecordingInternal(request) }, NATIVE_VAD_RESTART_MS)
+        }
+    }
+
+    private fun stopNativeRecordingAndUpload(request: NativeAutoRequest, restartAfterUpload: Boolean) {
+        stopNativeVadMonitor()
+        val recorder = nativeMediaRecorder
+        val file = nativeRecordingFile
+        nativeMediaRecorder = null
+        nativeRecordingFile = null
+        if (recorder == null || file == null) {
+            notifyJsAudioEvent("upload_error", "not_recording")
+            return
+        }
+        try {
+            recorder.stop()
+            recorder.release()
+        } catch (e: Exception) {
+            notifyJsAudioEvent("upload_error", e.message ?: "stop_failed")
+            return
+        }
+        Thread {
+            val (ok, message) = uploadVoiceFile(request.sessionId, request.language, file, request.mode)
+            file.delete()
+            runOnUiThread {
+                notifyJsAudioEvent(if (ok) "uploaded" else "upload_error", message)
+                if (restartAfterUpload && nativeAutoRequest == request) {
+                    nativeVadHandler.postDelayed({
+                        if (nativeAutoRequest == request) startNativeAutoRecordingInternal(request)
+                    }, NATIVE_VAD_RESTART_MS)
+                }
+            }
+        }.start()
     }
 
     private fun notifyJsAudioEvent(status: String, message: String) {
@@ -1004,7 +1106,10 @@ class MainActivity : Activity(), LifecycleOwner {
             val boundary = "----HubOneBoundary${System.currentTimeMillis()}"
             val base = config.baseUrl.trim().trimEnd('/')
             val isContact = mode == "contact"
-            val url = if (isContact)
+            val isConsultKiosk = mode == "consult_kiosk"
+            val url = if (isConsultKiosk)
+                URL("$base/api/consult/kiosk/transcribe")
+            else if (isContact)
                 URL("$base/api/patients/foreign-intake/voice/transcribe")
             else
                 URL("$base/api/patients/foreign-reservation/session/${Uri.encode(sessionIdOrScreenId)}/voice/transcribe")
@@ -1025,7 +1130,7 @@ class MainActivity : Activity(), LifecycleOwner {
                     writeText("$value\r\n")
                 }
                 writeField("language", language)
-                if (isContact) writeField("screen_id", sessionIdOrScreenId)
+                if (isContact || isConsultKiosk) writeField("screen_id", sessionIdOrScreenId)
                 writeText("--$boundary\r\n")
                 writeText("Content-Disposition: form-data; name=\"audio\"; filename=\"voice.m4a\"\r\n")
                 writeText("Content-Type: audio/mp4\r\n\r\n")
@@ -1081,6 +1186,12 @@ class MainActivity : Activity(), LifecycleOwner {
         // 상황에서도 이 시간 안에는 반드시 강제로 끊어서 uploaded/upload_error 콜백이
         // 나가도록 한다(실제 겪은 문제: "상담원에게 전달 중..."에서 무한 대기).
         private const val UPLOAD_WATCHDOG_MS = 45_000L
+        private const val NATIVE_VAD_POLL_MS = 80L
+        private const val NATIVE_VAD_SILENCE_MS = 850L
+        private const val NATIVE_VAD_IDLE_MS = 30_000L
+        private const val NATIVE_VAD_MAX_SPEECH_MS = 20_000L
+        private const val NATIVE_VAD_RESTART_MS = 180L
+        private const val NATIVE_VAD_AMPLITUDE_THRESHOLD = 900
 
         // CommandPollService가 MainActivity를 강제로 앞에 가져올 때(덴트웹 등에서 복귀)
         // 어느 화면을 띄울지 실어 보내는 Intent extra 키 — CommandPollState.SCREEN_CONTACT/
