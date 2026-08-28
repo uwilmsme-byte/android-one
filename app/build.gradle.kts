@@ -11,8 +11,8 @@ android {
         applicationId = "com.seoulprime.huboneagent"
         minSdk = 29
         targetSdk = 35
-        versionCode = 9
-        versionName = "0.6.3-tablet-native-vad"
+        versionCode = 10
+        versionName = "0.6.4-consult-popup"
     }
 
     buildTypes {

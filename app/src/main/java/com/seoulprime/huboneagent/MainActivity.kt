@@ -4,6 +4,7 @@ import android.Manifest
 import android.annotation.SuppressLint
 import android.app.Activity
 import android.app.AppOpsManager
+import android.app.Dialog
 import android.app.KeyguardManager
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -74,6 +75,8 @@ class MainActivity : Activity(), LifecycleOwner {
     private var fileCallback: ValueCallback<Array<Uri>>? = null
     private var discoveryStarted = false
     private var pendingPermissionRequest: PermissionRequest? = null
+    private var consultPopup: Dialog? = null
+    private var consultPopupWebView: WebView? = null
 
     // 실시간 통역 마이크 — 웹뷰가 http(HTTPS 아님)로 페이지를 열 경우 Chromium의 보안
     // 컨텍스트 정책 때문에 getUserMedia() 자체가 막힐 수 있다(권한을 다 승인해도 안됨).
@@ -216,8 +219,14 @@ class MainActivity : Activity(), LifecycleOwner {
         if (needsPermissionSetup()) {
             startActivity(Intent(this, SettingsActivity::class.java))
         }
-        applyScreenExtra(intent)
-        loadConfiguredPage()
+        if (intent?.getBooleanExtra(EXTRA_SCREEN_POPUP, false) == true) {
+            applyRequestedOrientation(intent.getStringExtra(EXTRA_SCREEN_ORIENTATION))
+            loadConfiguredPage()
+            showConsultPopup(intent.getStringExtra(EXTRA_SCREEN_PATH).orEmpty())
+        } else {
+            applyScreenExtra(intent)
+            loadConfiguredPage()
+        }
         // 화면전환 명령 폴링은 이 Activity의 생명주기와 분리된 포그라운드 서비스가 전담한다
         // (실제 요청 사항: "접수, 혹은 예약 화면을 열면 덴트웹 접수 화면에서 /pt,
         // /pt/reservation으로 화면이 전환되도록" — 예전엔 이 Activity가 백그라운드로
@@ -240,8 +249,13 @@ class MainActivity : Activity(), LifecycleOwner {
             launchDentWebAfterResume()
         }
         if (::webView.isInitialized) {
-            applyScreenExtra(newIntent)
-            loadConfiguredPage()
+            if (newIntent.getBooleanExtra(EXTRA_SCREEN_POPUP, false)) {
+                applyRequestedOrientation(newIntent.getStringExtra(EXTRA_SCREEN_ORIENTATION))
+                showConsultPopup(newIntent.getStringExtra(EXTRA_SCREEN_PATH).orEmpty())
+            } else {
+                applyScreenExtra(newIntent)
+                loadConfiguredPage()
+            }
         }
     }
 
@@ -497,6 +511,51 @@ class MainActivity : Activity(), LifecycleOwner {
         // 방금까지 떠 있던 다른 화면(덴트웹 등)에 포커스가 남아 터치가 안 먹는 경우가 있다.
         window.decorView.requestFocus()
         webView.requestFocus(View.FOCUS_DOWN)
+    }
+
+    // 통역상담은 접수 메인 화면을 덮어쓰지 않고 별도 앱 팝업에서 실행한다. 팝업 WebView에도
+    // HubOneAudio를 주입하므로 HTTP WebView에서 웹 마이크가 막혀도 네이티브 VAD가 동작한다.
+    private fun showConsultPopup(pagePath: String) {
+        if (pagePath.isBlank() || !pagePath.startsWith("/") || pagePath.startsWith("//") || pagePath.split("/").contains("..")) return
+        val base = config.baseUrl.trim().trimEnd('/')
+        val screen = config.screenId.trim().ifBlank { AgentConfig.DEFAULT_SCREEN_ID }
+        val separator = if (pagePath.contains("?")) "&" else "?"
+        val target = "$base$pagePath${separator}screen_id=${Uri.encode(screen)}"
+        if (!isAllowed(Uri.parse(target))) return
+
+        consultPopup?.dismiss()
+        val dialog = Dialog(this)
+        val root = FrameLayout(this).apply { setBackgroundColor(Color.WHITE) }
+        val popupWeb = WebView(this).apply {
+            settings.javaScriptEnabled = true
+            settings.domStorageEnabled = true
+            settings.allowFileAccess = true
+            settings.allowContentAccess = true
+            settings.mediaPlaybackRequiresUserGesture = true
+            CookieManager.getInstance().setAcceptCookie(true)
+            CookieManager.getInstance().setAcceptThirdPartyCookies(this@MainActivity, true)
+            addJavascriptInterface(AudioBridge(), "HubOneAudio")
+            webViewClient = SafeWebViewClient()
+        }
+        val close = Button(this).apply {
+            text = "닫기"
+            setOnClickListener { dialog.dismiss() }
+        }
+        root.addView(popupWeb, FrameLayout.LayoutParams(-1, -1))
+        root.addView(close, FrameLayout.LayoutParams(112, 68, Gravity.TOP or Gravity.END).apply { topMargin = 12; rightMargin = 12 })
+        dialog.setContentView(root)
+        dialog.setOnDismissListener {
+            if (consultPopupWebView === popupWeb) consultPopupWebView = null
+            if (consultPopup === dialog) consultPopup = null
+            if (nativeAutoRequest?.mode == "consult_kiosk") stopNativeAutoRecording()
+            popupWeb.destroy()
+        }
+        consultPopup = dialog
+        consultPopupWebView = popupWeb
+        dialog.show()
+        dialog.window?.setLayout((resources.displayMetrics.widthPixels * 0.92f).toInt(), (resources.displayMetrics.heightPixels * 0.90f).toInt())
+        popupWeb.loadUrl(target)
+        popupWeb.requestFocus(View.FOCUS_DOWN)
     }
 
     private fun isAllowed(uri: Uri): Boolean {
@@ -799,6 +858,18 @@ class MainActivity : Activity(), LifecycleOwner {
         nativeVadRunnable = null
     }
 
+    private fun stopNativeAutoRecording() {
+        nativeAutoRequest = null
+        stopNativeVadMonitor()
+        val recorder = nativeMediaRecorder
+        val file = nativeRecordingFile
+        nativeMediaRecorder = null
+        nativeRecordingFile = null
+        try { recorder?.stop() } catch (_: Exception) { /* already stopped */ }
+        try { recorder?.release() } catch (_: Exception) { /* no-op */ }
+        try { file?.delete() } catch (_: Exception) { /* no-op */ }
+    }
+
     private fun discardNativeRecording(event: String) {
         stopNativeVadMonitor()
         val recorder = nativeMediaRecorder
@@ -848,6 +919,7 @@ class MainActivity : Activity(), LifecycleOwner {
     private fun notifyJsAudioEvent(status: String, message: String) {
         val js = "window.__hubOneVoiceEvent && window.__hubOneVoiceEvent(${JSONObject.quote(status)}, ${JSONObject.quote(message)});"
         webView.evaluateJavascript(js, null)
+        consultPopupWebView?.evaluateJavascript(js, null)
     }
 
     // 페이지(foreign_contact_intake.html)가 window.HubOneCamera로 호출하는 네이티브
@@ -1199,6 +1271,7 @@ class MainActivity : Activity(), LifecycleOwner {
         const val EXTRA_SCREEN_COMMAND = "screen_command"
         const val EXTRA_SCREEN_PATH = "screen_path"
         const val EXTRA_SCREEN_ORIENTATION = "screen_orientation"
+        const val EXTRA_SCREEN_POPUP = "screen_popup"
         // 잠금화면 상태에서 "덴트웹" 명령이 왔을 때, 이 액티비티가 잠금화면 위로 뜬 뒤
         // 이어서 덴트웹을 실행하라는 표시 — 실제 겪은 문제: "잠금화면 상태에서 덴트웹
         // 눌러도 잠금화면 해제는 안됨"(남의 앱은 우리처럼 잠금화면 위에 못 뜬다).
