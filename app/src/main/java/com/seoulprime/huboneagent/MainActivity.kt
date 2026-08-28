@@ -533,7 +533,7 @@ class MainActivity : Activity(), LifecycleOwner {
             settings.allowContentAccess = true
             settings.mediaPlaybackRequiresUserGesture = true
             CookieManager.getInstance().setAcceptCookie(true)
-            CookieManager.getInstance().setAcceptThirdPartyCookies(this@MainActivity, true)
+            CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
             addJavascriptInterface(AudioBridge(), "HubOneAudio")
             webViewClient = SafeWebViewClient()
         }
