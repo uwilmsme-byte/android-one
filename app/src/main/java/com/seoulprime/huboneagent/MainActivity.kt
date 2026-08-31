@@ -831,6 +831,11 @@ class MainActivity : Activity(), LifecycleOwner {
                 if (recorder == null || nativeAutoRequest != request) return
                 val elapsed = System.currentTimeMillis() - startedAt
                 val amplitude = try { recorder.maxAmplitude } catch (_: Exception) { 0 }
+                // 웹뷰(패널) 쪽 시그널 바가 실제 입력 레벨을 전혀 못 받고 있었다(실사용
+                // 지적) — VAD 판정용으로 이미 80ms마다 샘플링하던 진폭을 그대로 JS에도
+                // 흘려보낸다. maxAmplitude는 이 호출 이후로 리셋되므로 VAD 판정 로직보다
+                // 먼저 읽어야 한다(이미 위에서 읽어둠).
+                notifyJsAudioLevel(amplitude)
                 if (amplitude >= NATIVE_VAD_AMPLITUDE_THRESHOLD) {
                     voicedFrames += 1
                     silenceSince = 0L
@@ -918,6 +923,15 @@ class MainActivity : Activity(), LifecycleOwner {
 
     private fun notifyJsAudioEvent(status: String, message: String) {
         val js = "window.__hubOneVoiceEvent && window.__hubOneVoiceEvent(${JSONObject.quote(status)}, ${JSONObject.quote(message)});"
+        webView.evaluateJavascript(js, null)
+        consultPopupWebView?.evaluateJavascript(js, null)
+    }
+
+    // 태블릿 통역(patient_view.html) 시그널 바용 — startAutoRecording()의 VAD 폴링 중
+    // 샘플링한 진폭을 그대로 전달한다. 상태 전환용 __hubOneVoiceEvent와 분리된 별도
+    // 콜백으로 둬서, 80ms마다 오는 이 값이 상태 머신 로직과 섞이지 않게 한다.
+    private fun notifyJsAudioLevel(amplitude: Int) {
+        val js = "window.__hubOneAudioLevel && window.__hubOneAudioLevel($amplitude);"
         webView.evaluateJavascript(js, null)
         consultPopupWebView?.evaluateJavascript(js, null)
     }
