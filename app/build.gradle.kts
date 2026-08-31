@@ -11,8 +11,8 @@ android {
         applicationId = "com.seoulprime.huboneagent"
         minSdk = 29
         targetSdk = 35
-        versionCode = 12
-        versionName = "0.6.6-consult-adaptive-vad"
+        versionCode = 13
+        versionName = "0.6.7-consult-vad-tighten"
     }
 
     buildTypes {

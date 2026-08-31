@@ -872,7 +872,14 @@ class MainActivity : Activity(), LifecycleOwner {
                     }
                     if (nativeVadNoiseCount >= 6 || elapsed >= 800L) {
                         val floor = if (nativeVadNoiseCount > 0) (nativeVadNoiseSum / nativeVadNoiseCount) else (NATIVE_VAD_AMPLITUDE_THRESHOLD / 3).toLong()
-                        nativeVadThreshold = (floor * 2.4).toInt().coerceIn(300, NATIVE_VAD_AMPLITUDE_THRESHOLD * 4)
+                        // 조용한 방에서는 바닥 소음이 낮아서 floor*2.4가 원래 고정값(900)
+                        // 보다도 낮게 나와, 오히려 더 민감해져 숨소리/손 닿는 소리 같은
+                        // 잡음에도 녹음이 시작되는 문제가 실사용으로 확인됐다(17번 중
+                        // 16번이 빈 전사) — 시끄러운 방에서는 threshold를 "올려서" 덜
+                        // 민감하게 만드는 용도로만 쓰고, 원래 고정값보다 낮아지는 건
+                        // 막는다(조용한 방/원거리 케이스는 이 값만으로는 못 돕고 실제
+                        // 게인 증폭이 따로 필요함 — 별도 작업).
+                        nativeVadThreshold = (floor * 2.4).toInt().coerceIn(NATIVE_VAD_AMPLITUDE_THRESHOLD, NATIVE_VAD_AMPLITUDE_THRESHOLD * 4)
                         nativeVadCalibrationDone = true
                         android.util.Log.d("HubOneVoice", "VAD threshold calibrated floor=$floor threshold=$nativeVadThreshold")
                     }
@@ -880,7 +887,10 @@ class MainActivity : Activity(), LifecycleOwner {
                 if (amplitude >= nativeVadThreshold) {
                     voicedFrames += 1
                     silenceSince = 0L
-                    if (voicedFrames >= 2) hadSpeech = true
+                    // 스파이크 하나(순간적 잡음)로 바로 발화 처리되는 걸 막기 위해
+                    // 연속 프레임 요구치를 2→3으로 늘린다(80ms 폴링 기준 최소
+                    // ~240ms 지속돼야 발화로 인정).
+                    if (voicedFrames >= 3) hadSpeech = true
                 } else if (hadSpeech) {
                     if (silenceSince == 0L) silenceSince = System.currentTimeMillis()
                     if (System.currentTimeMillis() - silenceSince >= NATIVE_VAD_SILENCE_MS || elapsed >= NATIVE_VAD_MAX_SPEECH_MS) {
