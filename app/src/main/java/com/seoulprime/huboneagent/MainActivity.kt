@@ -731,6 +731,10 @@ class MainActivity : Activity(), LifecycleOwner {
         fun startAutoRecording(sessionId: String, language: String, mode: String) {
             runOnUiThread {
                 val request = NativeAutoRequest(sessionId, language, mode)
+                // 여기가 JS 쪽에서 부르는 "진짜 세션 시작" 지점이다(내부 재시작은
+                // startNativeAutoRecordingInternal을 직접 부르지 여길 다시 안 거침) —
+                // 태블릿-환자 거리/주변 소음이 다른 새 세션마다 VAD 보정을 새로 한다.
+                resetNativeVadCalibration()
                 if (ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.RECORD_AUDIO)
                     != PackageManager.PERMISSION_GRANTED
                 ) {
@@ -815,6 +819,25 @@ class MainActivity : Activity(), LifecycleOwner {
         }
     }
 
+    // 고정 진폭 임계값(NATIVE_VAD_AMPLITUDE_THRESHOLD) 하나로는 태블릿-환자 거리와
+    // 진료실 소음 수준이 제각각인 걸 감당 못 한다 — 가까우면 숨소리도 발화로 잡고,
+    // 멀거나 시끄러우면 아예 못 잡는다(실사용 지적: gain 필요해보임). 세션 시작
+    // 시점의 무음 구간 진폭 평균("바닥")을 재서 그 위로 동적 임계값을 잡는다 — 매
+    // 발화 사이클마다(discardNativeRecording/stopNativeRecordingAndUpload가 자체
+    // 재시작) 리셋되면 안 되므로, 진짜 세션 시작 지점(AudioBridge.startAutoRecording)
+    // 에서만 리셋하고 그 사이 내부 재시작들은 이전 보정값을 계속 쓴다.
+    private var nativeVadThreshold = NATIVE_VAD_AMPLITUDE_THRESHOLD
+    private var nativeVadNoiseSum = 0L
+    private var nativeVadNoiseCount = 0
+    private var nativeVadCalibrationDone = false
+
+    private fun resetNativeVadCalibration() {
+        nativeVadThreshold = NATIVE_VAD_AMPLITUDE_THRESHOLD
+        nativeVadNoiseSum = 0L
+        nativeVadNoiseCount = 0
+        nativeVadCalibrationDone = false
+    }
+
     private fun startNativeAutoRecordingInternal(request: NativeAutoRequest) {
         nativeAutoRequest = request
         stopNativeVadMonitor()
@@ -836,7 +859,25 @@ class MainActivity : Activity(), LifecycleOwner {
                 // 흘려보낸다. maxAmplitude는 이 호출 이후로 리셋되므로 VAD 판정 로직보다
                 // 먼저 읽어야 한다(이미 위에서 읽어둠).
                 notifyJsAudioLevel(amplitude)
-                if (amplitude >= NATIVE_VAD_AMPLITUDE_THRESHOLD) {
+                // 세션당 한 번만 보정한다 — 이 발화 사이클이 짧게 끝나 표본이 부족하면
+                // (voicedFrames >= 2로 hadSpeech 처리 안 됐을 때) 다음 사이클(재시작)에서
+                // nativeVadCalibrationDone이 여전히 false라 계속 표본을 모은다.
+                if (!nativeVadCalibrationDone) {
+                    // 정적 임계값을 상한 필터로 써서, 이미 말하는 중인 표본이 바닥
+                    // 평균에 섞이는 걸 막는다(브라우저 폴백 경로의 _startVadMonitor와
+                    // 동일한 방식).
+                    if (amplitude < NATIVE_VAD_AMPLITUDE_THRESHOLD) {
+                        nativeVadNoiseSum += amplitude
+                        nativeVadNoiseCount += 1
+                    }
+                    if (nativeVadNoiseCount >= 6 || elapsed >= 800L) {
+                        val floor = if (nativeVadNoiseCount > 0) (nativeVadNoiseSum / nativeVadNoiseCount) else (NATIVE_VAD_AMPLITUDE_THRESHOLD / 3).toLong()
+                        nativeVadThreshold = (floor * 2.4).toInt().coerceIn(300, NATIVE_VAD_AMPLITUDE_THRESHOLD * 4)
+                        nativeVadCalibrationDone = true
+                        android.util.Log.d("HubOneVoice", "VAD threshold calibrated floor=$floor threshold=$nativeVadThreshold")
+                    }
+                }
+                if (amplitude >= nativeVadThreshold) {
                     voicedFrames += 1
                     silenceSince = 0L
                     if (voicedFrames >= 2) hadSpeech = true
