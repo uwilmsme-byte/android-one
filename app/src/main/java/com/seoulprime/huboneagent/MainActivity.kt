@@ -62,7 +62,7 @@ import okhttp3.Request
 import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
-import okio.ByteString
+import okio.toByteString
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.io.File
@@ -1007,7 +1007,7 @@ class MainActivity : Activity(), LifecycleOwner {
                         i += 2
                     }
                     runOnUiThread { notifyJsAudioLevel(peak) }
-                    if (consultVadWebSocket?.send(ByteString.of(buffer, 0, count)) != true) {
+                    if (consultVadWebSocket?.send(buffer.toByteString(0, count)) != true) {
                         throw IllegalStateException("server_vad_send_failed")
                     }
                 }
