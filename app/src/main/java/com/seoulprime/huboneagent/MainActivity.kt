@@ -16,6 +16,8 @@ import android.graphics.Matrix
 import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.RectF
+import android.media.AudioFormat
+import android.media.AudioRecord
 import android.media.MediaRecorder
 import android.net.Uri
 import android.os.Build
@@ -55,12 +57,21 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.LifecycleRegistry
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.Response
+import okhttp3.WebSocket
+import okhttp3.WebSocketListener
+import okio.ByteString
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
+import java.net.URLEncoder
 import java.util.Locale
+import java.util.concurrent.TimeUnit
+import kotlin.math.abs
 
 class MainActivity : Activity(), LifecycleOwner {
     // CameraX가 미리보기/촬영 바인딩을 이 Activity의 실제 생명주기(onStart/onResume/
@@ -90,6 +101,19 @@ class MainActivity : Activity(), LifecycleOwner {
     private var nativeAutoRequest: NativeAutoRequest? = null
     private val nativeVadHandler = Handler(Looper.getMainLooper())
     private var nativeVadRunnable: Runnable? = null
+    private val consultVadClient by lazy {
+        OkHttpClient.Builder()
+            .connectTimeout(5, TimeUnit.SECONDS)
+            .readTimeout(0, TimeUnit.MILLISECONDS)
+            .pingInterval(15, TimeUnit.SECONDS)
+            .build()
+    }
+    private var consultVadWebSocket: WebSocket? = null
+    private var consultVadAudioRecord: AudioRecord? = null
+    private var consultVadAudioThread: Thread? = null
+    @Volatile private var consultVadConnecting = false
+    @Volatile private var consultVadRunning = false
+    @Volatile private var consultVadStopping = false
 
     private data class NativeAutoRequest(
         val sessionId: String,
@@ -399,6 +423,7 @@ class MainActivity : Activity(), LifecycleOwner {
     }
 
     override fun onDestroy() {
+        stopConsultServerVad()
         super.onDestroy()
         if (activeInstance === this) activeInstance = null
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_DESTROY)
@@ -695,7 +720,10 @@ class MainActivity : Activity(), LifecycleOwner {
             val autoRequest = pendingNativeAutoRequest
             pendingNativeAutoRequest = null
             if (granted) {
-                if (autoRequest != null) startNativeAutoRecordingInternal(autoRequest) else startNativeRecordingInternal()
+                if (autoRequest != null) {
+                    if (autoRequest.mode == "consult_kiosk") startConsultServerVad(autoRequest)
+                    else startNativeAutoRecordingInternal(autoRequest)
+                } else startNativeRecordingInternal()
             } else {
                 notifyJsAudioEvent("start_error", "permission_denied")
             }
@@ -725,16 +753,18 @@ class MainActivity : Activity(), LifecycleOwner {
             }
         }
 
-        // 통역상담 kiosk의 무조작 VAD 경로. 웹 WebView의 getUserMedia가 막힌 기기에서도
-        // 네이티브 MediaRecorder 진폭을 이용해 발화 종료를 감지하고 곧바로 업로드한다.
+        // 통역상담 kiosk는 PCM만 원내 서버로 보내고 서버 Silero가 발화 경계를
+        // 판정한다. 서버 연결이 실패한 경우에만 아래의 기존 MediaRecorder 진폭 VAD로
+        // 자동 폴백한다. 다른 예약/접수 모드는 기존 동작을 그대로 유지한다.
         @JavascriptInterface
         fun startAutoRecording(sessionId: String, language: String, mode: String) {
             runOnUiThread {
                 val request = NativeAutoRequest(sessionId, language, mode)
-                // 여기가 JS 쪽에서 부르는 "진짜 세션 시작" 지점이다(내부 재시작은
-                // startNativeAutoRecordingInternal을 직접 부르지 여길 다시 안 거침) —
-                // 태블릿-환자 거리/주변 소음이 다른 새 세션마다 VAD 보정을 새로 한다.
-                resetNativeVadCalibration()
+                if (request.mode == "consult_kiosk" &&
+                    (consultVadConnecting || consultVadRunning) && nativeAutoRequest == request
+                ) return@runOnUiThread
+                nativeAutoRequest = request
+                if (request.mode != "consult_kiosk") resetNativeVadCalibration()
                 if (ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.RECORD_AUDIO)
                     != PackageManager.PERMISSION_GRANTED
                 ) {
@@ -747,7 +777,8 @@ class MainActivity : Activity(), LifecycleOwner {
                     )
                     return@runOnUiThread
                 }
-                startNativeAutoRecordingInternal(request)
+                if (request.mode == "consult_kiosk") startConsultServerVad(request)
+                else startNativeAutoRecordingInternal(request)
             }
         }
 
@@ -758,7 +789,15 @@ class MainActivity : Activity(), LifecycleOwner {
         @JavascriptInterface
         fun stopAndUpload(sessionId: String, language: String, mode: String) {
             android.util.Log.d("HubOneVoice", "stopAndUpload called sessionId=$sessionId mode=$mode")
-            runOnUiThread { stopNativeRecordingAndUpload(NativeAutoRequest(sessionId, language, mode), false) }
+            runOnUiThread {
+                val request = NativeAutoRequest(sessionId, language, mode)
+                if (mode == "consult_kiosk" && (consultVadConnecting || consultVadRunning)) {
+                    val sent = consultVadWebSocket?.send(JSONObject().put("type", "finish").toString()) == true
+                    if (!sent) fallbackToLocalVad(request, "manual_finish_send_failed")
+                } else {
+                    stopNativeRecordingAndUpload(request, false)
+                }
+            }
         }
     }
 
@@ -817,6 +856,182 @@ class MainActivity : Activity(), LifecycleOwner {
             nativeRecordingFile = null
             notifyJsAudioEvent("start_error", e.message ?: "recorder_error")
         }
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun startConsultServerVad(request: NativeAutoRequest) {
+        if (consultVadConnecting || consultVadRunning) return
+        nativeAutoRequest = request
+        consultVadStopping = false
+        consultVadConnecting = true
+        val base = config.baseUrl.trim().trimEnd('/')
+        val wsBase = when {
+            base.startsWith("https://", ignoreCase = true) -> "wss://${base.substringAfter("://")}"
+            base.startsWith("http://", ignoreCase = true) -> "ws://${base.substringAfter("://")}"
+            else -> "ws://$base"
+        }
+        val screen = URLEncoder.encode(request.sessionId, Charsets.UTF_8.name())
+        val language = URLEncoder.encode(request.language, Charsets.UTF_8.name())
+        val url = "$wsBase/api/consult/kiosk/vad-stream?screen_id=$screen&language=$language"
+        val wsRequest = Request.Builder().url(url).build()
+        android.util.Log.i("HubOneVoice", "server Silero VAD connecting url=$url")
+        consultVadWebSocket = consultVadClient.newWebSocket(wsRequest, object : WebSocketListener() {
+            override fun onOpen(webSocket: WebSocket, response: Response) {
+                android.util.Log.i("HubOneVoice", "server Silero VAD websocket opened")
+            }
+
+            override fun onMessage(webSocket: WebSocket, text: String) {
+                val payload = try { JSONObject(text) } catch (_: Exception) { return }
+                when (payload.optString("type")) {
+                    "ready" -> runOnUiThread {
+                        consultVadConnecting = false
+                        if (!consultVadRunning) startConsultPcmCapture(request)
+                        else notifyJsAudioEvent("started", "server_silero_ready")
+                    }
+                    "finish_hint" -> runOnUiThread {
+                        notifyJsAudioEvent(if (payload.optBoolean("active")) "finish_hint" else "finish_hint_clear", "")
+                    }
+                    "segment_result" -> runOnUiThread {
+                        notifyJsAudioEvent("finish_hint_clear", "")
+                        val ok = payload.optBoolean("ok")
+                        val error = payload.optString("error")
+                        // 빈 구간/중복은 정상적인 VAD 결과다. 스트림을 끊지 않고 다음
+                        // 발화를 계속 기다리도록 업로드 완료와 listening 재개를 알린다.
+                        if (ok || error == "empty_transcript" || error == "empty_segment" || error == "segment_too_short") {
+                            notifyJsAudioEvent("uploaded", error)
+                            notifyJsAudioEvent("started", "server_silero_ready")
+                        } else if (error == "not_patient_turn") {
+                            notifyJsAudioEvent("uploaded", error)
+                        } else {
+                            notifyJsAudioEvent("upload_error", error.ifBlank { "server_vad_segment_failed" })
+                            fallbackToLocalVad(request, error.ifBlank { "server_vad_segment_failed" })
+                        }
+                    }
+                    "paused" -> runOnUiThread { notifyJsAudioEvent("finish_hint_clear", "") }
+                    "error" -> runOnUiThread {
+                        fallbackToLocalVad(request, payload.optString("error", "server_vad_error"))
+                    }
+                }
+            }
+
+            override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                android.util.Log.w("HubOneVoice", "server Silero VAD failed: ${t.message}", t)
+                runOnUiThread {
+                    if (!consultVadStopping && nativeAutoRequest == request) {
+                        fallbackToLocalVad(request, t.message ?: "server_vad_disconnected")
+                    }
+                }
+            }
+
+            override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+                runOnUiThread {
+                    if (!consultVadStopping && nativeAutoRequest == request) {
+                        fallbackToLocalVad(request, "server_vad_closed_$code")
+                    }
+                }
+            }
+        })
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun startConsultPcmCapture(request: NativeAutoRequest) {
+        if (consultVadRunning || nativeAutoRequest != request) return
+        val minBuffer = AudioRecord.getMinBufferSize(
+            CONSULT_PCM_SAMPLE_RATE,
+            AudioFormat.CHANNEL_IN_MONO,
+            AudioFormat.ENCODING_PCM_16BIT,
+        )
+        if (minBuffer <= 0) {
+            fallbackToLocalVad(request, "audio_record_buffer_error")
+            return
+        }
+        val recorder = try {
+            AudioRecord.Builder()
+                .setAudioSource(MediaRecorder.AudioSource.VOICE_RECOGNITION)
+                .setAudioFormat(
+                    AudioFormat.Builder()
+                        .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                        .setSampleRate(CONSULT_PCM_SAMPLE_RATE)
+                        .setChannelMask(AudioFormat.CHANNEL_IN_MONO)
+                        .build()
+                )
+                .setBufferSizeInBytes(maxOf(minBuffer, CONSULT_PCM_CHUNK_BYTES * 4))
+                .build()
+        } catch (e: Exception) {
+            fallbackToLocalVad(request, e.message ?: "audio_record_create_failed")
+            return
+        }
+        try {
+            recorder.startRecording()
+        } catch (e: Exception) {
+            try { recorder.release() } catch (_: Exception) { }
+            fallbackToLocalVad(request, e.message ?: "audio_record_start_failed")
+            return
+        }
+        consultVadAudioRecord = recorder
+        consultVadRunning = true
+        consultVadConnecting = false
+        notifyJsAudioEvent("started", "server_silero_ready")
+        consultVadAudioThread = Thread {
+            val buffer = ByteArray(CONSULT_PCM_CHUNK_BYTES)
+            try {
+                while (consultVadRunning && nativeAutoRequest == request) {
+                    val count = recorder.read(buffer, 0, buffer.size, AudioRecord.READ_BLOCKING)
+                    if (count <= 0) continue
+                    var peak = 0
+                    var i = 0
+                    while (i + 1 < count) {
+                        val sample = (buffer[i].toInt() and 0xff) or (buffer[i + 1].toInt() shl 8)
+                        peak = maxOf(peak, abs(sample.toShort().toInt()))
+                        i += 2
+                    }
+                    runOnUiThread { notifyJsAudioLevel(peak) }
+                    if (consultVadWebSocket?.send(ByteString.of(buffer, 0, count)) != true) {
+                        throw IllegalStateException("server_vad_send_failed")
+                    }
+                }
+            } catch (e: Exception) {
+                android.util.Log.w("HubOneVoice", "PCM stream stopped: ${e.message}", e)
+                runOnUiThread {
+                    if (!consultVadStopping && nativeAutoRequest == request) {
+                        fallbackToLocalVad(request, e.message ?: "pcm_stream_failed")
+                    }
+                }
+            } finally {
+                try { recorder.stop() } catch (_: Exception) { }
+                try { recorder.release() } catch (_: Exception) { }
+                if (consultVadAudioRecord === recorder) consultVadAudioRecord = null
+            }
+        }.apply {
+            name = "HubOneConsultPcm"
+            isDaemon = true
+            start()
+        }
+    }
+
+    private fun stopConsultServerVad() {
+        consultVadStopping = true
+        consultVadConnecting = false
+        consultVadRunning = false
+        try { consultVadAudioRecord?.stop() } catch (_: Exception) { }
+        consultVadAudioThread?.interrupt()
+        consultVadAudioThread = null
+        consultVadAudioRecord = null
+        try { consultVadWebSocket?.close(1000, "client_stop") } catch (_: Exception) { }
+        consultVadWebSocket = null
+    }
+
+    private fun fallbackToLocalVad(request: NativeAutoRequest, reason: String) {
+        if (nativeAutoRequest != request) return
+        android.util.Log.w("HubOneVoice", "falling back to local amplitude VAD: $reason")
+        stopConsultServerVad()
+        resetNativeVadCalibration()
+        notifyJsAudioEvent("finish_hint_clear", "")
+        nativeVadHandler.postDelayed({
+            if (nativeAutoRequest == request && nativeMediaRecorder == null) {
+                startNativeAutoRecordingInternal(request)
+            }
+        }, NATIVE_VAD_RESTART_MS)
     }
 
     // 고정 진폭 임계값(NATIVE_VAD_AMPLITUDE_THRESHOLD) 하나로는 태블릿-환자 거리와
@@ -893,10 +1108,19 @@ class MainActivity : Activity(), LifecycleOwner {
                     if (voicedFrames >= 3) hadSpeech = true
                 } else if (hadSpeech) {
                     if (silenceSince == 0L) silenceSince = System.currentTimeMillis()
-                    if (System.currentTimeMillis() - silenceSince >= NATIVE_VAD_SILENCE_MS || elapsed >= NATIVE_VAD_MAX_SPEECH_MS) {
+                    if (System.currentTimeMillis() - silenceSince >= NATIVE_VAD_SILENCE_MS) {
                         stopNativeRecordingAndUpload(request, true)
                         return
                     }
+                }
+                // 최대 발화 시간은 무음 분기 안에 두면 안 된다. 에어컨/음악처럼
+                // 배경 소음이 계속 동적 임계값보다 크면 silenceSince가 계속 0으로
+                // 리셋되어, 기존에는 이 제한이 사실상 영원히 실행되지 않았다.
+                // 보정된 배경 소음 임계값은 발화 시작/종료 판정에 그대로 쓰되, 한
+                // 녹음 조각의 상한은 진폭과 무관하게 항상 적용한다.
+                if (hadSpeech && elapsed >= NATIVE_VAD_MAX_SPEECH_MS) {
+                    stopNativeRecordingAndUpload(request, true)
+                    return
                 }
                 if (!hadSpeech && elapsed >= NATIVE_VAD_IDLE_MS) {
                     discardNativeRecording("idle")
@@ -916,6 +1140,7 @@ class MainActivity : Activity(), LifecycleOwner {
 
     private fun stopNativeAutoRecording() {
         nativeAutoRequest = null
+        stopConsultServerVad()
         stopNativeVadMonitor()
         val recorder = nativeMediaRecorder
         val file = nativeRecordingFile
@@ -1329,6 +1554,8 @@ class MainActivity : Activity(), LifecycleOwner {
         private const val NATIVE_VAD_MAX_SPEECH_MS = 20_000L
         private const val NATIVE_VAD_RESTART_MS = 180L
         private const val NATIVE_VAD_AMPLITUDE_THRESHOLD = 900
+        private const val CONSULT_PCM_SAMPLE_RATE = 16_000
+        private const val CONSULT_PCM_CHUNK_BYTES = 3_200  // 100ms, mono PCM16
 
         // CommandPollService가 MainActivity를 강제로 앞에 가져올 때(덴트웹 등에서 복귀)
         // 어느 화면을 띄울지 실어 보내는 Intent extra 키 — CommandPollState.SCREEN_CONTACT/
