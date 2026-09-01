@@ -14,7 +14,7 @@ class HubOneModeWidget : AppWidgetProvider() {
             val views = RemoteViews(context.packageName, R.layout.widget_hubone_modes).apply {
                 setOnClickPendingIntent(
                     R.id.widget_tablet_consult,
-                    openPage(context, 101, "/static/consult.html?quick=1&tablet_only=1&hubone_build=20260901-2", "landscape", popup = true),
+                    openPage(context, 101, "/static/consult.html?quick=1&tablet_only=1&hubone_build=20260901-3", "landscape", popup = true),
                 )
                 setOnClickPendingIntent(
                     R.id.widget_tablet_consent,
