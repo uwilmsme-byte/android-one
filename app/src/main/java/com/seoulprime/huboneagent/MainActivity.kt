@@ -910,6 +910,7 @@ class MainActivity : Activity(), LifecycleOwner {
         consultVadWebSocket = consultVadClient.newWebSocket(wsRequest, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 android.util.Log.i("HubOneVoice", "server Silero VAD websocket opened")
+                runOnUiThread { notifyJsAudioEvent("server_connected", "server_silero_connected") }
             }
 
             override fun onMessage(webSocket: WebSocket, text: String) {
