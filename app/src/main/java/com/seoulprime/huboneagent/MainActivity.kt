@@ -85,6 +85,9 @@ class MainActivity : Activity(), LifecycleOwner {
     private var lastLoadedUrl = ""
     private var fileCallback: ValueCallback<Array<Uri>>? = null
     private var discoveryStarted = false
+    private var connectionRetryRunnable: Runnable? = null
+    private var connectionRetryCount = 0
+    private var connectionStatusText: TextView? = null
     private var pendingPermissionRequest: PermissionRequest? = null
     private var consultPopup: Dialog? = null
     private var consultPopupWebView: WebView? = null
@@ -423,6 +426,7 @@ class MainActivity : Activity(), LifecycleOwner {
     }
 
     override fun onDestroy() {
+        connectionRetryRunnable?.let { Handler(Looper.getMainLooper()).removeCallbacks(it) }
         stopConsultServerVad()
         super.onDestroy()
         if (activeInstance === this) activeInstance = null
@@ -433,14 +437,18 @@ class MainActivity : Activity(), LifecycleOwner {
         orientation = LinearLayout.VERTICAL
         gravity = Gravity.CENTER
         setBackgroundColor(Color.WHITE)
-        addView(TextView(this@MainActivity).apply {
+        connectionStatusText = TextView(this@MainActivity).apply {
             text = "서버에 연결할 수 없습니다"
             textSize = 22f
             setTextColor(Color.DKGRAY)
-        })
+        }
+        connectionStatusText?.let { addView(it) }
         addView(Button(this@MainActivity).apply {
             text = "다시 시도"
-            setOnClickListener { loadConfiguredPage() }
+            setOnClickListener {
+                connectionRetryCount = 0
+                loadConfiguredPage()
+            }
         })
     }
 
@@ -596,7 +604,31 @@ class MainActivity : Activity(), LifecycleOwner {
             uri.host?.lowercase(Locale.ROOT) == baseHost
     }
 
-    private fun showError() { errorView.visibility = View.VISIBLE }
+    private fun showError() {
+        errorView.visibility = View.VISIBLE
+        val isConsent = currentScreenPath.substringBefore('?') == SCREEN_PATH_CONSENT
+        val retrySeconds = 3
+        connectionStatusText?.text = if (isConsent) {
+            "서버에 연결할 수 없습니다\n동의서 작성은 계속할 수 있습니다. 저장 시 임시 보관됩니다."
+        } else {
+            "서버에 연결할 수 없습니다\n${retrySeconds}초 후 자동으로 다시 시도합니다."
+        }
+        if (isConsent) return
+        connectionRetryRunnable?.let { Handler(Looper.getMainLooper()).removeCallbacks(it) }
+        if (connectionRetryCount >= MAX_CONNECTION_RETRIES) {
+            connectionStatusText?.text = "서버 연결이 계속 실패합니다\n덴트웹 접수 화면으로 전환합니다."
+            launchDentWebAfterResume()
+            connectionRetryCount = 0
+            return
+        }
+        val retry = Runnable {
+            connectionRetryRunnable = null
+            connectionRetryCount += 1
+            loadConfiguredPage()
+        }
+        connectionRetryRunnable = retry
+        Handler(Looper.getMainLooper()).postDelayed(retry, retrySeconds * 1_000L)
+    }
 
     private fun startAutoDiscovery() {
         // 이미 정상 연결이 검증된 수동 지정 주소는 일시적 접속 실패로도 자동검색이 조용히
@@ -1562,18 +1594,24 @@ class MainActivity : Activity(), LifecycleOwner {
 
         override fun onPageFinished(view: WebView, url: String?) {
             super.onPageFinished(view, url)
+            if (view === webView) {
+                connectionRetryCount = 0
+                connectionRetryRunnable?.let { Handler(Looper.getMainLooper()).removeCallbacks(it) }
+                connectionRetryRunnable = null
+                errorView.visibility = View.GONE
+            }
             markBaseUrlVerifiedIfNeeded()
         }
 
         override fun onReceivedError(view: WebView, request: WebResourceRequest, error: android.webkit.WebResourceError) {
-            if (request.isForMainFrame) {
+            if (request.isForMainFrame && view === webView) {
                 showError()
                 startAutoDiscovery()
             }
         }
 
         override fun onReceivedHttpError(view: WebView, request: WebResourceRequest, errorResponse: android.webkit.WebResourceResponse) {
-            if (request.isForMainFrame && errorResponse.statusCode >= 500) {
+            if (request.isForMainFrame && view === webView && errorResponse.statusCode >= 500) {
                 showError()
                 startAutoDiscovery()
             }
@@ -1596,6 +1634,7 @@ class MainActivity : Activity(), LifecycleOwner {
         private const val NATIVE_VAD_IDLE_MS = 30_000L
         private const val NATIVE_VAD_MAX_SPEECH_MS = 20_000L
         private const val NATIVE_VAD_RESTART_MS = 180L
+        private const val MAX_CONNECTION_RETRIES = 5
         private const val NATIVE_VAD_AMPLITUDE_THRESHOLD = 900
         private const val CONSULT_PCM_SAMPLE_RATE = 16_000
         private const val CONSULT_PCM_CHUNK_BYTES = 3_200  // 100ms, mono PCM16

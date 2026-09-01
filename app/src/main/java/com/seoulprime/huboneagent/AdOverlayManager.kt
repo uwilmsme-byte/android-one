@@ -164,10 +164,18 @@ class AdOverlayManager(private val context: Context) {
             val cfg = fetchConfig(screen, base)
             handler.post {
                 if (!armed) return@post // 그 사이 덴트웹에서 벗어났으면 취소
-                if (cfg == null) return@post
+                if (cfg == null) {
+                    // 서버가 일시적으로 끊겨도 idle 타이머가 여기서 끝나지 않게 한다.
+                    // 다음 주기에 설정을 다시 조회한다.
+                    resetIdleTimer()
+                    return@post
+                }
                 cachedIdleMs = cfg.idleMs // 다음 idle 대기부터 갱신된 값을 쓴다.
                 touchSplitEnabled = cfg.touchSplit
-                if (!cfg.enabled || cfg.slideUrls.isEmpty()) return@post
+                if (!cfg.enabled || cfg.slideUrls.isEmpty()) {
+                    resetIdleTimer()
+                    return@post
+                }
                 slideUrls = cfg.slideUrls
                 slideIntervalMs = cfg.slideIntervalMs
                 slideIndex = 0
@@ -238,7 +246,15 @@ class AdOverlayManager(private val context: Context) {
                 null
             }
             handler.post {
-                if (adOverlayView === iv && bmp != null) iv.setImageBitmap(bmp)
+                if (adOverlayView === iv) {
+                    if (bmp != null) {
+                        iv.setImageBitmap(bmp)
+                    } else {
+                        // 이미지까지 내려받지 못한 검은 화면을 계속 덮어두지 않는다.
+                        hideAdOverlay()
+                        if (armed) resetIdleTimer()
+                    }
+                }
             }
         }.start()
     }
