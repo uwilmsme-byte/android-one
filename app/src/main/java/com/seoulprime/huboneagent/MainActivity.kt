@@ -579,7 +579,12 @@ class MainActivity : Activity(), LifecycleOwner {
         consultPopup = dialog
         consultPopupWebView = popupWeb
         dialog.show()
-        dialog.window?.setLayout((resources.displayMetrics.widthPixels * 0.92f).toInt(), (resources.displayMetrics.heightPixels * 0.90f).toInt())
+        // 태블릿 상담은 기존 화면으로 돌아갈 수 있는 floating 창이지만,
+        // 상담 중에는 화면 가장자리까지 사용해 일반 전체 화면처럼 보이게 한다.
+        dialog.window?.setLayout(
+            WindowManager.LayoutParams.MATCH_PARENT,
+            WindowManager.LayoutParams.MATCH_PARENT,
+        )
         popupWeb.loadUrl(target)
         popupWeb.requestFocus(View.FOCUS_DOWN)
     }
