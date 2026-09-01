@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#EEF2F7"
+    android:gravity="center"
+    android:orientation="horizontal"
+    android:padding="6dp">
+
+    <Button
+        android:id="@+id/widget_tablet_consult"
+        android:layout_width="0dp"
+        android:layout_height="match_parent"
+        android:layout_margin="3dp"
+        android:layout_weight="1"
+        android:text="태블릿상담"
+        android:textSize="14sp" />
+
+    <Button
+        android:id="@+id/widget_tablet_consent"
+        android:layout_width="0dp"
+        android:layout_height="match_parent"
+        android:layout_margin="3dp"
+        android:layout_weight="1"
+        android:text="태블릿동의서"
+        android:textSize="14sp" />
+
+    <Button
+        android:id="@+id/widget_paired_interpret"
+        android:layout_width="0dp"
+        android:layout_height="match_parent"
+        android:layout_margin="3dp"
+        android:layout_weight="1"
+        android:text="통역(태블릿+PC)"
+        android:textSize="13sp" />
+</LinearLayout>

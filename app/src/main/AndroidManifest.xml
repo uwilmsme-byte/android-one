@@ -79,6 +79,16 @@
                 <action android:name="android.intent.action.LOCKED_BOOT_COMPLETED" />
             </intent-filter>
         </receiver>
+        <receiver
+            android:name=".HubOneModeWidget"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/hubone_mode_widget_info" />
+        </receiver>
         <!-- 절전(sleep) 명령용 — HubOneDeviceAdminReceiver 참고. android:permission
              선언이 필수(시스템만 이 리시버를 호출할 수 있게 강제). -->
         <receiver

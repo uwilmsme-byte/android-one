@@ -145,7 +145,7 @@ class MainActivity : Activity(), LifecycleOwner {
         activeInstance = this
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_CREATE)
         requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
-        enterImmersiveMode()
+        showSystemNavigation()
         config = AgentConfig.load(this)
         applyScreenPolicy()
         // "wake"/open_contact/open_reservation 명령으로 불려나온 경우에만 화면을 깨운다
@@ -572,7 +572,7 @@ class MainActivity : Activity(), LifecycleOwner {
         dialog.setOnDismissListener {
             if (consultPopupWebView === popupWeb) consultPopupWebView = null
             if (consultPopup === dialog) consultPopup = null
-            if (nativeAutoRequest?.mode == "consult_kiosk") stopNativeAutoRecording()
+            if (nativeAutoRequest?.mode in setOf("consult_kiosk", "consult_single")) stopNativeAutoRecording()
             popupWeb.destroy()
         }
         consultPopup = dialog
@@ -660,22 +660,25 @@ class MainActivity : Activity(), LifecycleOwner {
         try { window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON) } catch (_: Exception) { /* 무시 */ }
     }
 
-    private fun enterImmersiveMode() {
-        window.decorView.systemUiVisibility = (View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
-            or View.SYSTEM_UI_FLAG_FULLSCREEN or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
-            or View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
-            or View.SYSTEM_UI_FLAG_LAYOUT_STABLE)
+    private fun showSystemNavigation() {
+        // 홈 위젯으로 곧바로 이동할 수 있도록 Android 하단 내비게이션은 항상 보인다.
+        // 상담 웹 화면의 세로 공간을 최대한 유지하기 위해 상단 상태바만 숨긴다.
+        window.decorView.systemUiVisibility = (
+            View.SYSTEM_UI_FLAG_FULLSCREEN or
+                View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or
+                View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+        )
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
         // CommandPollService의 focused 보고에 쓰인다 — 허브원 보드 탭 상태 표시용.
         CommandPollState.windowFocused = hasFocus
-        if (hasFocus) enterImmersiveMode()
+        if (hasFocus) showSystemNavigation()
     }
 
     override fun onBackPressed() {
-        if (webView.canGoBack()) webView.goBack()
+        if (webView.canGoBack()) webView.goBack() else super.onBackPressed()
     }
 
     @Deprecated("Android activity result API kept for Android 10 compatibility")
@@ -721,7 +724,7 @@ class MainActivity : Activity(), LifecycleOwner {
             pendingNativeAutoRequest = null
             if (granted) {
                 if (autoRequest != null) {
-                    if (autoRequest.mode == "consult_kiosk") startConsultServerVad(autoRequest)
+                    if (isConsultServerVadMode(autoRequest.mode)) startConsultServerVad(autoRequest)
                     else startNativeAutoRecordingInternal(autoRequest)
                 } else startNativeRecordingInternal()
             } else {
@@ -760,11 +763,14 @@ class MainActivity : Activity(), LifecycleOwner {
         fun startAutoRecording(sessionId: String, language: String, mode: String) {
             runOnUiThread {
                 val request = NativeAutoRequest(sessionId, language, mode)
-                if (request.mode == "consult_kiosk" &&
-                    (consultVadConnecting || consultVadRunning) && nativeAutoRequest == request
-                ) return@runOnUiThread
+                if (isConsultServerVadMode(request.mode) && (consultVadConnecting || consultVadRunning)) {
+                    if (nativeAutoRequest == request) return@runOnUiThread
+                    // 재사용된 팝업이 patient_view와 단일 마이크 상담 사이를 이동하면
+                    // 이전 WebSocket의 capture_mode를 그대로 쓰지 않도록 교체한다.
+                    stopNativeAutoRecording()
+                }
                 nativeAutoRequest = request
-                if (request.mode != "consult_kiosk") resetNativeVadCalibration()
+                if (!isConsultServerVadMode(request.mode)) resetNativeVadCalibration()
                 if (ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.RECORD_AUDIO)
                     != PackageManager.PERMISSION_GRANTED
                 ) {
@@ -777,7 +783,7 @@ class MainActivity : Activity(), LifecycleOwner {
                     )
                     return@runOnUiThread
                 }
-                if (request.mode == "consult_kiosk") startConsultServerVad(request)
+                if (isConsultServerVadMode(request.mode)) startConsultServerVad(request)
                 else startNativeAutoRecordingInternal(request)
             }
         }
@@ -791,12 +797,26 @@ class MainActivity : Activity(), LifecycleOwner {
             android.util.Log.d("HubOneVoice", "stopAndUpload called sessionId=$sessionId mode=$mode")
             runOnUiThread {
                 val request = NativeAutoRequest(sessionId, language, mode)
-                if (mode == "consult_kiosk" && (consultVadConnecting || consultVadRunning)) {
+                if (isConsultServerVadMode(mode) && (consultVadConnecting || consultVadRunning)) {
                     val sent = consultVadWebSocket?.send(JSONObject().put("type", "finish").toString()) == true
                     if (!sent) fallbackToLocalVad(request, "manual_finish_send_failed")
                 } else {
                     stopNativeRecordingAndUpload(request, false)
                 }
+            }
+        }
+
+        @JavascriptInterface
+        fun resetAutoRecording() {
+            if (!consultVadRunning) return
+            consultVadWebSocket?.send(JSONObject().put("type", "reset").toString())
+        }
+
+        @JavascriptInterface
+        fun stopAutoRecording() {
+            runOnUiThread {
+                stopNativeAutoRecording()
+                notifyJsAudioEvent("idle", "native_single_stopped")
             }
         }
     }
@@ -872,7 +892,8 @@ class MainActivity : Activity(), LifecycleOwner {
         }
         val screen = URLEncoder.encode(request.sessionId, Charsets.UTF_8.name())
         val language = URLEncoder.encode(request.language, Charsets.UTF_8.name())
-        val url = "$wsBase/api/consult/kiosk/vad-stream?screen_id=$screen&language=$language"
+        val captureMode = if (request.mode == "consult_single") "consult_single" else "patient_view"
+        val url = "$wsBase/api/consult/kiosk/vad-stream?screen_id=$screen&language=$language&capture_mode=$captureMode"
         val wsRequest = Request.Builder().url(url).build()
         android.util.Log.i("HubOneVoice", "server Silero VAD connecting url=$url")
         consultVadWebSocket = consultVadClient.newWebSocket(wsRequest, object : WebSocketListener() {
@@ -897,7 +918,7 @@ class MainActivity : Activity(), LifecycleOwner {
                         val error = payload.optString("error")
                         // 빈 구간/중복은 정상적인 VAD 결과다. 스트림을 끊지 않고 다음
                         // 발화를 계속 기다리도록 업로드 완료와 listening 재개를 알린다.
-                        if (ok || error == "empty_transcript" || error == "empty_segment" || error == "segment_too_short") {
+                        if (ok || error == "empty_transcript" || error == "empty_segment" || error == "segment_too_short" || error == "consult_on_hold") {
                             notifyJsAudioEvent("uploaded", error)
                             notifyJsAudioEvent("started", "server_silero_ready")
                         } else if (error == "not_patient_turn") {
@@ -1023,6 +1044,13 @@ class MainActivity : Activity(), LifecycleOwner {
 
     private fun fallbackToLocalVad(request: NativeAutoRequest, reason: String) {
         if (nativeAutoRequest != request) return
+        if (request.mode == "consult_single") {
+            android.util.Log.e("HubOneVoice", "native single mic server VAD unavailable: $reason")
+            stopConsultServerVad()
+            notifyJsAudioEvent("finish_hint_clear", "")
+            notifyJsAudioEvent("start_error", reason)
+            return
+        }
         android.util.Log.w("HubOneVoice", "falling back to local amplitude VAD: $reason")
         stopConsultServerVad()
         resetNativeVadCalibration()
@@ -1202,6 +1230,9 @@ class MainActivity : Activity(), LifecycleOwner {
         webView.evaluateJavascript(js, null)
         consultPopupWebView?.evaluateJavascript(js, null)
     }
+
+    private fun isConsultServerVadMode(mode: String): Boolean =
+        mode == "consult_kiosk" || mode == "consult_single"
 
     // 태블릿 통역(patient_view.html) 시그널 바용 — startAutoRecording()의 VAD 폴링 중
     // 샘플링한 진폭을 그대로 전달한다. 상태 전환용 __hubOneVoiceEvent와 분리된 별도
