@@ -560,6 +560,7 @@ class MainActivity : Activity(), LifecycleOwner {
             CookieManager.getInstance().setAcceptCookie(true)
             CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
             addJavascriptInterface(AudioBridge(), "HubOneAudio")
+            addJavascriptInterface(NavBridge(), "HubOneNav")
             webViewClient = SafeWebViewClient()
         }
         val close = Button(this).apply {
@@ -826,6 +827,11 @@ class MainActivity : Activity(), LifecycleOwner {
     // CommandPollService.launchDentWeb()(서버가 미는 return_to_dentweb 명령용)과 로직은
     // 같지만, 이쪽은 환자가 웹뷰에서 직접 누른 즉시 반응이라 서버 왕복이 필요 없다.
     private inner class NavBridge {
+        @JavascriptInterface
+        fun closeConsult() {
+            runOnUiThread { consultPopup?.dismiss() }
+        }
+
         @JavascriptInterface
         fun launchDentWeb() {
             runOnUiThread {

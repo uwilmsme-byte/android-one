@@ -14,7 +14,7 @@ class HubOneModeWidget : AppWidgetProvider() {
             val views = RemoteViews(context.packageName, R.layout.widget_hubone_modes).apply {
                 setOnClickPendingIntent(
                     R.id.widget_tablet_consult,
-                    openPage(context, 101, "/static/consult.html?quick=1&tablet_only=1&hubone_build=20260901-2", "landscape"),
+                    openPage(context, 101, "/static/consult.html?quick=1&tablet_only=1&hubone_build=20260901-2", "landscape", popup = true),
                 )
                 setOnClickPendingIntent(
                     R.id.widget_tablet_consent,
@@ -29,13 +29,14 @@ class HubOneModeWidget : AppWidgetProvider() {
         }
     }
 
-    private fun openPage(context: Context, requestCode: Int, path: String, orientation: String): PendingIntent {
+    private fun openPage(context: Context, requestCode: Int, path: String, orientation: String, popup: Boolean = false): PendingIntent {
         val intent = Intent(context, MainActivity::class.java).apply {
             action = "com.seoulprime.huboneagent.OPEN_WIDGET_MODE.$requestCode"
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
             putExtra(MainActivity.EXTRA_SCREEN_COMMAND, path)
             putExtra(MainActivity.EXTRA_SCREEN_PATH, path)
             putExtra(MainActivity.EXTRA_SCREEN_ORIENTATION, orientation)
+            putExtra(MainActivity.EXTRA_SCREEN_POPUP, popup)
         }
         return PendingIntent.getActivity(
             context,
