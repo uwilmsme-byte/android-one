@@ -11,7 +11,7 @@ android {
         applicationId = "com.seoulprime.huboneagent"
         minSdk = 29
         targetSdk = 35
-        versionCode = 16
+        versionCode = 20
         versionName = "0.7.0-mode-widget"
     }
 
