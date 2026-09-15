@@ -576,7 +576,10 @@ class MainActivity : Activity(), LifecycleOwner {
             setOnClickListener { dialog.dismiss() }
         }
         root.addView(popupWeb, FrameLayout.LayoutParams(-1, -1))
-        root.addView(close, FrameLayout.LayoutParams(112, 68, Gravity.TOP or Gravity.END).apply { topMargin = 12; rightMargin = 12 })
+        // 우상단은 consult.html 자체 상단바의 마지막 버튼(⚙ 설정)과 정확히 겹쳐서
+        // 그 버튼을 누를 방법이 없었다(실사용 지적) — 페이지 쪽 상단바가 꽉 차 있는
+        // 반면 하단 우측은 평소엔 비어있는(디버그 패널만 숨겨져 있는) 영역이라 거기로 옮긴다.
+        root.addView(close, FrameLayout.LayoutParams(112, 68, Gravity.BOTTOM or Gravity.END).apply { bottomMargin = 12; rightMargin = 12 })
         dialog.setContentView(root)
         dialog.setOnDismissListener {
             if (consultPopupWebView === popupWeb) consultPopupWebView = null
