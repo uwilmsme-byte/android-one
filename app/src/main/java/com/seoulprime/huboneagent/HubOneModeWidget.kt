@@ -7,7 +7,7 @@ import android.content.Context
 import android.content.Intent
 import android.widget.RemoteViews
 
-/** 홈 화면에서 HUBONE 태블릿의 세 가지 상담 화면을 바로 여는 작은 모드 선택 위젯. */
+/** 홈 화면에서 HUBONE 태블릿의 세 가지 상담 화면 + 관리자 설정을 바로 여는 작은 모드 선택 위젯. */
 class HubOneModeWidget : AppWidgetProvider() {
     override fun onUpdate(context: Context, manager: AppWidgetManager, widgetIds: IntArray) {
         widgetIds.forEach { widgetId ->
@@ -24,9 +24,25 @@ class HubOneModeWidget : AppWidgetProvider() {
                     R.id.widget_paired_interpret,
                     openPage(context, 103, "/patient_view.html?autolisten=1", "landscape"),
                 )
+                setOnClickPendingIntent(R.id.widget_settings, openSettings(context))
             }
             manager.updateAppWidget(widgetId, views)
         }
+    }
+
+    // 화면 우상단 5초 꾹누르기 제스처를 태블릿 현장에서 매번 찾기 번거롭다는 실사용
+    // 지적 — 위젯에서 SettingsActivity를 바로 띄우는 버튼을 별도로 둔다. 일반 환자용
+    // 위젯이 아니라 직원이 홈 화면에 배치해 쓰는 위젯이라 노출해도 된다.
+    private fun openSettings(context: Context): PendingIntent {
+        val intent = Intent(context, SettingsActivity::class.java).apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        return PendingIntent.getActivity(
+            context,
+            104,
+            intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
     }
 
     private fun openPage(context: Context, requestCode: Int, path: String, orientation: String, popup: Boolean = false): PendingIntent {
