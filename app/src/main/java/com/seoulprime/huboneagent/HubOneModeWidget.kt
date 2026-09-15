@@ -14,7 +14,13 @@ class HubOneModeWidget : AppWidgetProvider() {
             val views = RemoteViews(context.packageName, R.layout.widget_hubone_modes).apply {
                 setOnClickPendingIntent(
                     R.id.widget_tablet_consult,
-                    openPage(context, 101, "/static/consult.html?quick=1&tablet_only=1&hubone_build=20260901-3", "landscape", popup = true),
+                    // screen_id가 있어야 consult.html의 _isNativeSingleMicAvailable()이
+                    // HubOneAudio 네이티브 브릿지(서버 Silero VAD 스트리밍, /api/consult/
+                    // kiosk/vad-stream)를 쓴다 — 없으면 순수 웹 getUserMedia()로 빠지는데,
+                    // 이 앱은 서버를 http 내부 IP로 여는 경우가 많아 보안 컨텍스트가 아니라서
+                    // "마이크를 사용할 수 없습니다"로 실패했다(실사용 지적). screen_id 하나
+                    // 추가로 기존에 이미 있던 네이티브 브릿지 경로를 타게 한다.
+                    openPage(context, 101, "/static/consult.html?quick=1&tablet_only=1&screen_id=tablet_solo&hubone_build=20260901-4", "landscape", popup = true),
                 )
                 setOnClickPendingIntent(
                     R.id.widget_tablet_consent,
