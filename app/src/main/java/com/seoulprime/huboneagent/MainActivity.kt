@@ -90,6 +90,7 @@ class MainActivity : Activity(), LifecycleOwner {
     private var connectionStatusText: TextView? = null
     private var pageLoadFailed = false
     private var pageLoadTimeout: Runnable? = null
+    private var loadingIndicatorRunnable: Runnable? = null
     private var pendingPermissionRequest: PermissionRequest? = null
     private var consultPopup: Dialog? = null
     private var consultPopupWebView: WebView? = null
@@ -435,6 +436,7 @@ class MainActivity : Activity(), LifecycleOwner {
     override fun onDestroy() {
         connectionRetryRunnable?.let { Handler(Looper.getMainLooper()).removeCallbacks(it) }
         pageLoadTimeout?.let { Handler(Looper.getMainLooper()).removeCallbacks(it) }
+        cancelLoadingIndicator()
         stopConsultServerVad()
         super.onDestroy()
         if (activeInstance === this) activeInstance = null
@@ -445,6 +447,7 @@ class MainActivity : Activity(), LifecycleOwner {
         orientation = LinearLayout.VERTICAL
         gravity = Gravity.CENTER
         setBackgroundColor(Color.WHITE)
+        visibility = View.GONE
         connectionStatusText = TextView(this@MainActivity).apply {
             text = "서버에 연결할 수 없습니다"
             textSize = 22f
@@ -625,9 +628,23 @@ class MainActivity : Activity(), LifecycleOwner {
             uri.host?.lowercase(Locale.ROOT) == baseHost
     }
 
+    private fun cancelLoadingIndicator() {
+        loadingIndicatorRunnable?.let { Handler(Looper.getMainLooper()).removeCallbacks(it) }
+        loadingIndicatorRunnable = null
+    }
+
     private fun showLoading() {
-        errorView.visibility = View.VISIBLE
-        connectionStatusText?.text = "서버 화면을 불러오는 중입니다...\n${config.baseUrl.trimEnd('/')}${currentScreenPath.substringBefore('?')}"
+        cancelLoadingIndicator()
+        errorView.visibility = View.GONE
+        val expectedUrl = lastLoadedUrl
+        val loading = Runnable {
+            loadingIndicatorRunnable = null
+            if (lastLoadedUrl != expectedUrl || pageLoadFailed || pageLoadTimeout == null) return@Runnable
+            connectionStatusText?.text = "서버 화면을 불러오는 중입니다...\n${config.baseUrl.trimEnd('/')}${currentScreenPath.substringBefore('?')}"
+            errorView.visibility = View.VISIBLE
+        }
+        loadingIndicatorRunnable = loading
+        Handler(Looper.getMainLooper()).postDelayed(loading, 2_000L)
     }
 
     private fun cancelPageLoadTimeout() {
@@ -650,6 +667,7 @@ class MainActivity : Activity(), LifecycleOwner {
     }
 
     private fun showError(reason: String) {
+        cancelLoadingIndicator()
         cancelPageLoadTimeout()
         errorView.visibility = View.VISIBLE
         val isConsent = currentScreenPath.substringBefore('?') == SCREEN_PATH_CONSENT
@@ -1642,6 +1660,7 @@ class MainActivity : Activity(), LifecycleOwner {
         override fun onPageFinished(view: WebView, url: String?) {
             super.onPageFinished(view, url)
             if (view === webView && url == lastLoadedUrl && !pageLoadFailed) {
+                cancelLoadingIndicator()
                 cancelPageLoadTimeout()
                 connectionRetryCount = 0
                 connectionRetryRunnable?.let { Handler(Looper.getMainLooper()).removeCallbacks(it) }
