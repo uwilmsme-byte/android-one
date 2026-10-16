@@ -216,6 +216,10 @@ class CommandPollService : Service() {
                 val popup = json.optBoolean("popup", false)
                 android.util.Log.d("HubOneSleep", "poll received command='$command' path='$pagePath' orientation='$orientation' popup=$popup token=$commandToken id=$commandId screenOn=$screenOn")
                 if (command.isBlank()) return@Thread
+                AgentLog.info(
+                    "CommandPollService",
+                    "command_received screen=$screen command=$command path=$pagePath id=$commandId"
+                )
 
                 // command_token은 서버가 FIFO 대기열 + ACK로 명령을 관리하는 식별자다 —
                 // 같은 토큰을 다시 받으면(네트워크 문제 등으로 우리 ACK가 서버에 안 갔다는 뜻)
