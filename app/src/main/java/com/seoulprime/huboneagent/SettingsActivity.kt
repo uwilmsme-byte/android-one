@@ -17,6 +17,8 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
 import java.net.HttpURLConnection
 import java.net.URL
 
@@ -38,6 +40,20 @@ class SettingsActivity : Activity() {
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(28, 20, 28, 20)
+        }
+        // targetSdk 35 앱은 Android 15에서 edge-to-edge가 강제되어 시스템 상태바가
+        // 콘텐츠 위에 겹칠 수 있다. 설정 화면의 제목과 입력란을 시스템 영역 아래로 밀어준다.
+        ViewCompat.setOnApplyWindowInsetsListener(root) { view, windowInsets ->
+            val safeInsets = windowInsets.getInsets(
+                WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout()
+            )
+            view.setPadding(
+                28 + safeInsets.left,
+                20 + safeInsets.top,
+                28 + safeInsets.right,
+                20 + safeInsets.bottom,
+            )
+            windowInsets
         }
         root.addView(TextView(this).apply { text = "HUBONE Agent 관리자 설정"; textSize = 22f })
         // 실제 겪은 문제: 최신 빌드를 설치했다고 생각했는데 옛날 APK가 그대로 깔려있는 걸
@@ -198,7 +214,9 @@ class SettingsActivity : Activity() {
         // 오늘 하루에도 버튼/설명이 계속 늘어서(카메라·마이크·전면앱확인·화면위표시·절전명령
         // 5개 권한 버튼 + 6개 동작 버튼) 세로 길이가 화면을 넘어설 수 있다 — ScrollView로
         // 감싸서 아래쪽 버튼이 화면 밖으로 잘리지 않게 방어적으로 처리한다.
-        setContentView(ScrollView(this).apply { addView(root) })
+        val content = ScrollView(this).apply { addView(root) }
+        setContentView(content)
+        ViewCompat.requestApplyInsets(root)
         refreshPermissionButtons()
     }
 
