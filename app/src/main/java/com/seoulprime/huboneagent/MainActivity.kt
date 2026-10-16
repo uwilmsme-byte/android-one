@@ -150,7 +150,11 @@ class MainActivity : Activity(), LifecycleOwner {
         AgentLog.info("MainActivity", "onCreate_begin")
         activeInstance = this
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_CREATE)
-        requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+        // 시작 인텐트의 방향을 먼저 적용한다. 세로 화면 요청을 받은 뒤 가로로 고정하면
+        // 방향 변경에 따른 액티비티 재생성 때마다 가로↔세로 전환이 반복될 수 있다.
+        val initialOrientation = intent?.getStringExtra(EXTRA_SCREEN_ORIENTATION)
+            ?.takeIf { it.isNotBlank() } ?: "landscape"
+        applyRequestedOrientation(initialOrientation)
         config = AgentConfig.load(this)
         AgentLog.info("MainActivity", "config_loaded")
         applyScreenPolicy()
