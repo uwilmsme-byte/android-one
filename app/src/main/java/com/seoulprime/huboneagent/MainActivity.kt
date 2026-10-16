@@ -151,7 +151,6 @@ class MainActivity : Activity(), LifecycleOwner {
         activeInstance = this
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_CREATE)
         requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
-        showSystemNavigation()
         config = AgentConfig.load(this)
         AgentLog.info("MainActivity", "config_loaded")
         applyScreenPolicy()
@@ -254,6 +253,7 @@ class MainActivity : Activity(), LifecycleOwner {
             FrameLayout.LayoutParams(260, 260, Gravity.TOP or Gravity.END).apply { topMargin = 160 }
         )
         setContentView(root)
+        showSystemNavigation()
         AgentLog.info("MainActivity", "content_view_attached")
         if (intent?.getBooleanExtra(EXTRA_SCREEN_POPUP, false) == true) {
             applyRequestedOrientation(intent.getStringExtra(EXTRA_SCREEN_ORIENTATION))
