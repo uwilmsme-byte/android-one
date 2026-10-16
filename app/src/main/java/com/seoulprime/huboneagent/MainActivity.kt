@@ -77,6 +77,7 @@ class MainActivity : Activity(), LifecycleOwner {
     // onPause/onStop)에 맞춰 자동으로 시작·정지하도록 하기 위한 최소 LifecycleOwner
     // 구현 — 이 Activity는 android.app.Activity라 androidx의 자동 디스패치가 없다.
     private val lifecycleRegistry = LifecycleRegistry(this)
+    private val uiHandler = Handler(Looper.getMainLooper())
     override val lifecycle: Lifecycle get() = lifecycleRegistry
     private lateinit var config: AgentConfig
     private lateinit var webView: WebView
@@ -310,7 +311,7 @@ class MainActivity : Activity(), LifecycleOwner {
     // 해제는 안됨". 우리 창이 실제로 잠금화면 위에 떠서 화면이 인터랙티브해진 뒤에
     // 실행해야 하므로 약간의 지연을 둔다.
     private fun launchDentWebAfterResume() {
-        Handler(Looper.getMainLooper()).postDelayed({
+        uiHandler.postDelayed({
             val pkg = AgentConfig.load(this).dentwebPackage.trim()
             if (pkg.isBlank()) return@postDelayed
             val launchIntent = try { packageManager.getLaunchIntentForPackage(pkg) } catch (_: Exception) { null }
@@ -360,7 +361,7 @@ class MainActivity : Activity(), LifecycleOwner {
         } else {
             // API 26 미만은 requestDismissKeyguard가 없다 — 5초 뒤 정리(이 앱 minSdk가
             // 29라 사실상 도달하지 않는 경로).
-            Handler(Looper.getMainLooper()).postDelayed({ clearTransientWakeFlags() }, 5_000)
+            uiHandler.postDelayed({ clearTransientWakeFlags() }, 5_000)
         }
     }
 
@@ -443,8 +444,8 @@ class MainActivity : Activity(), LifecycleOwner {
     }
 
     override fun onDestroy() {
-        connectionRetryRunnable?.let { Handler(Looper.getMainLooper()).removeCallbacks(it) }
-        pageLoadTimeout?.let { Handler(Looper.getMainLooper()).removeCallbacks(it) }
+        connectionRetryRunnable?.let { uiHandler.removeCallbacks(it) }
+        pageLoadTimeout?.let { uiHandler.removeCallbacks(it) }
         cancelLoadingIndicator()
         stopConsultServerVad()
         super.onDestroy()
@@ -471,7 +472,7 @@ class MainActivity : Activity(), LifecycleOwner {
             text = "다시 시도"
             setOnClickListener {
                 connectionRetryCount = 0
-                connectionRetryRunnable?.let { Handler(Looper.getMainLooper()).removeCallbacks(it) }
+                connectionRetryRunnable?.let { uiHandler.removeCallbacks(it) }
                 connectionRetryRunnable = null
                 loadConfiguredPage()
             }
@@ -545,7 +546,7 @@ class MainActivity : Activity(), LifecycleOwner {
     private fun loadConfiguredPage() {
         // 자동검색으로 다른 서버를 찾거나 새 화면 명령이 오면 이전 실패의 예약 재시도를
         // 취소한다. 두 경로가 겹치면 같은 WebView에 loadUrl()이 연달아 들어간다.
-        connectionRetryRunnable?.let { Handler(Looper.getMainLooper()).removeCallbacks(it) }
+        connectionRetryRunnable?.let { uiHandler.removeCallbacks(it) }
         connectionRetryRunnable = null
         config = AgentConfig.load(this)
         applyScreenPolicy()
@@ -646,7 +647,7 @@ class MainActivity : Activity(), LifecycleOwner {
     }
 
     private fun cancelLoadingIndicator() {
-        loadingIndicatorRunnable?.let { Handler(Looper.getMainLooper()).removeCallbacks(it) }
+        loadingIndicatorRunnable?.let { uiHandler.removeCallbacks(it) }
         loadingIndicatorRunnable = null
     }
 
@@ -661,11 +662,11 @@ class MainActivity : Activity(), LifecycleOwner {
             errorView.visibility = View.VISIBLE
         }
         loadingIndicatorRunnable = loading
-        Handler(Looper.getMainLooper()).postDelayed(loading, 2_000L)
+        uiHandler.postDelayed(loading, 2_000L)
     }
 
     private fun cancelPageLoadTimeout() {
-        pageLoadTimeout?.let { Handler(Looper.getMainLooper()).removeCallbacks(it) }
+        pageLoadTimeout?.let { uiHandler.removeCallbacks(it) }
         pageLoadTimeout = null
     }
 
@@ -681,7 +682,7 @@ class MainActivity : Activity(), LifecycleOwner {
             startAutoDiscovery()
         }
         pageLoadTimeout = timeout
-        Handler(Looper.getMainLooper()).postDelayed(timeout, 20_000L)
+        uiHandler.postDelayed(timeout, 20_000L)
     }
 
     private fun showError(reason: String) {
@@ -707,7 +708,7 @@ class MainActivity : Activity(), LifecycleOwner {
             "서버 화면을 불러오지 못했습니다\n$detail\n${retrySeconds}초 후 다시 시도합니다."
         }
         if (isConsent) return
-        connectionRetryRunnable?.let { Handler(Looper.getMainLooper()).removeCallbacks(it) }
+        connectionRetryRunnable?.let { uiHandler.removeCallbacks(it) }
         if (connectionRetryCount >= MAX_CONNECTION_RETRIES) {
             CommandPollState.adStatusMessage = "[AD_TRACE] fallback_to_dentweb path=$pagePath retry=$connectionRetryCount".take(240)
             connectionStatusText?.text = "서버 연결이 계속 실패합니다\n$detail\n덴트웹 접수 화면으로 전환합니다."
@@ -721,7 +722,7 @@ class MainActivity : Activity(), LifecycleOwner {
             loadConfiguredPage()
         }
         connectionRetryRunnable = retry
-        Handler(Looper.getMainLooper()).postDelayed(retry, retrySeconds * 1_000L)
+        uiHandler.postDelayed(retry, retrySeconds * 1_000L)
     }
 
     private fun startAutoDiscovery() {
@@ -1692,7 +1693,7 @@ class MainActivity : Activity(), LifecycleOwner {
                 cancelLoadingIndicator()
                 cancelPageLoadTimeout()
                 connectionRetryCount = 0
-                connectionRetryRunnable?.let { Handler(Looper.getMainLooper()).removeCallbacks(it) }
+                connectionRetryRunnable?.let { uiHandler.removeCallbacks(it) }
                 connectionRetryRunnable = null
                 errorView.visibility = View.GONE
                 val elapsedMs = if (pageLoadStartedAtMs > 0L) android.os.SystemClock.elapsedRealtime() - pageLoadStartedAtMs else -1L

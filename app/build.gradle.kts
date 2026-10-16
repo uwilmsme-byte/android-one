@@ -11,8 +11,8 @@ android {
         applicationId = "com.seoulprime.huboneagent"
         minSdk = 29
         targetSdk = 35
-        versionCode = 31
-        versionName = "0.7.11-page-timeout"
+        versionCode = 32
+        versionName = "0.7.12-handler-fix"
     }
 
     buildTypes {
