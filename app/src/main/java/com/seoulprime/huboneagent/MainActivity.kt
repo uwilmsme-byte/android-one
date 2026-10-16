@@ -536,6 +536,10 @@ class MainActivity : Activity(), LifecycleOwner {
     }
 
     private fun loadConfiguredPage() {
+        // 자동검색으로 다른 서버를 찾거나 새 화면 명령이 오면 이전 실패의 예약 재시도를
+        // 취소한다. 두 경로가 겹치면 같은 WebView에 loadUrl()이 연달아 들어간다.
+        connectionRetryRunnable?.let { Handler(Looper.getMainLooper()).removeCallbacks(it) }
+        connectionRetryRunnable = null
         config = AgentConfig.load(this)
         applyScreenPolicy()
         // 이 Activity가 실제로 화면을 그리는 순간을 "현재 화면 상태"의 기준으로 삼는다 —
@@ -706,21 +710,24 @@ class MainActivity : Activity(), LifecycleOwner {
         if (config.manualBaseUrl && config.manualBaseUrlVerified) return
         if (discoveryStarted) return
         discoveryStarted = true
+        val searchedBaseUrl = config.baseUrl
         Thread {
-            val discovered = ServerDiscovery.discover(config.baseUrl)
+            val discovered = ServerDiscovery.discover(searchedBaseUrl)
             runOnUiThread {
                 discoveryStarted = false
-                if (!discovered.isNullOrBlank()) {
-                    // discover()가 지금 설정된 주소를 그대로 재확인만 한 경우(같은 값)라면
-                    // 수동 잠금을 풀 이유가 없다 — 실제로 다른 서버로 전환됐을 때만 잠금을
-                    // 해제한다(ServerDiscovery.probe() 버그 수정 후에도 안전하게 유지).
-                    val switchedToDifferentServer = discovered != config.baseUrl
-                    config = config.copy(
+                val latest = AgentConfig.load(this)
+                // 검색 중 관리자가 주소를 바꿨다면 오래된 검색 결과를 적용하지 않는다.
+                if (latest.baseUrl != searchedBaseUrl) return@runOnUiThread
+                // /health만 성공하고 실제 /pt는 실패할 수 있다. 같은 서버가 다시 발견됐다는
+                // 이유로 즉시 loadUrl()을 호출하면 실패→검색→재로드 루프가 생긴다.
+                if (!discovered.isNullOrBlank() && discovered != searchedBaseUrl) {
+                    config = latest.copy(
                         baseUrl = discovered,
-                        manualBaseUrl = if (switchedToDifferentServer) false else config.manualBaseUrl,
-                        manualBaseUrlVerified = if (switchedToDifferentServer) false else true
+                        manualBaseUrl = false,
+                        manualBaseUrlVerified = false
                     )
                     config.save(this)
+                    connectionRetryCount = 0
                     loadConfiguredPage()
                 }
             }

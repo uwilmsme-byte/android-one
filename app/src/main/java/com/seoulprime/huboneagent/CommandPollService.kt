@@ -23,6 +23,7 @@ import androidx.core.app.NotificationCompat
 import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * 화면전환 명령(deskchat/api/agent_commands.py) 폴링을 MainActivity 생명주기(onResume/
@@ -46,6 +47,7 @@ class CommandPollService : Service() {
     private var lastCommandToken = ""
     private var lastCommandResult: Pair<Boolean, String>? = null
     private var pollRunnable: Runnable? = null
+    private val pollInFlight = AtomicBoolean(false)
 
     // UsageStats 조회는 비용이 있어 캐싱한다(3초 폴링마다 매번 새로 안 함).
     private var lastForegroundCheckAt = 0L
@@ -180,6 +182,8 @@ class CommandPollService : Service() {
         // — 실제 요청 사항: "절전 상태인지 깨있는 상태인지 감지는 안되나?".
         val screenOn = getSystemService(PowerManager::class.java)?.isInteractive ?: true
 
+        // 서버 응답이 3초 폴링 주기보다 늦어져도 요청 스레드를 중첩 생성하지 않는다.
+        if (!pollInFlight.compareAndSet(false, true)) return
         Thread {
             try {
                 val query = "screen_id=${Uri.encode(screen)}&current_screen=${Uri.encode(currentScreen)}" +
@@ -228,6 +232,8 @@ class CommandPollService : Service() {
                 if (commandToken.isNotBlank()) reportCommandResult(screen, commandToken, command, result.first, result.second)
             } catch (_: Exception) {
                 // 다음 3초 주기에 조용히 재시도
+            } finally {
+                pollInFlight.set(false)
             }
         }.start()
     }
