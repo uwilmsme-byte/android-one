@@ -88,6 +88,8 @@ class MainActivity : Activity(), LifecycleOwner {
     private var connectionRetryRunnable: Runnable? = null
     private var connectionRetryCount = 0
     private var connectionStatusText: TextView? = null
+    private var pageLoadFailed = false
+    private var pageLoadTimeout: Runnable? = null
     private var pendingPermissionRequest: PermissionRequest? = null
     private var consultPopup: Dialog? = null
     private var consultPopupWebView: WebView? = null
@@ -427,6 +429,7 @@ class MainActivity : Activity(), LifecycleOwner {
 
     override fun onDestroy() {
         connectionRetryRunnable?.let { Handler(Looper.getMainLooper()).removeCallbacks(it) }
+        pageLoadTimeout?.let { Handler(Looper.getMainLooper()).removeCallbacks(it) }
         stopConsultServerVad()
         super.onDestroy()
         if (activeInstance === this) activeInstance = null
@@ -444,9 +447,15 @@ class MainActivity : Activity(), LifecycleOwner {
         }
         connectionStatusText?.let { addView(it) }
         addView(Button(this@MainActivity).apply {
+            text = "서버 설정"
+            setOnClickListener { openAdmin() }
+        })
+        addView(Button(this@MainActivity).apply {
             text = "다시 시도"
             setOnClickListener {
                 connectionRetryCount = 0
+                connectionRetryRunnable?.let { Handler(Looper.getMainLooper()).removeCallbacks(it) }
+                connectionRetryRunnable = null
                 loadConfiguredPage()
             }
         })
@@ -533,12 +542,14 @@ class MainActivity : Activity(), LifecycleOwner {
         val target = "$base$currentScreenPath${separator}screen_id=${Uri.encode(screen)}"
         val uri = Uri.parse(target)
         if (!isAllowed(uri)) {
-            showError()
+            showError("서버 주소 형식이 올바르지 않습니다.")
             startAutoDiscovery()
             return
         }
         lastLoadedUrl = target
-        errorView.visibility = View.GONE
+        pageLoadFailed = false
+        showLoading()
+        schedulePageLoadTimeout()
         webView.loadUrl(target)
         // 명령 수신 후 이 화면이 실제 입력 대상이 되도록 포커스를 되돌린다 — URL만 바꾸면
         // 방금까지 떠 있던 다른 화면(덴트웹 등)에 포커스가 남아 터치가 안 먹는 경우가 있다.
@@ -607,19 +618,45 @@ class MainActivity : Activity(), LifecycleOwner {
             uri.host?.lowercase(Locale.ROOT) == baseHost
     }
 
-    private fun showError() {
+    private fun showLoading() {
+        errorView.visibility = View.VISIBLE
+        connectionStatusText?.text = "서버 화면을 불러오는 중입니다...\n${config.baseUrl.trimEnd('/')}${currentScreenPath.substringBefore('?')}"
+    }
+
+    private fun cancelPageLoadTimeout() {
+        pageLoadTimeout?.let { Handler(Looper.getMainLooper()).removeCallbacks(it) }
+        pageLoadTimeout = null
+    }
+
+    private fun schedulePageLoadTimeout() {
+        cancelPageLoadTimeout()
+        val expectedUrl = lastLoadedUrl
+        val timeout = Runnable {
+            if (lastLoadedUrl != expectedUrl || pageLoadFailed) return@Runnable
+            pageLoadFailed = true
+            webView.stopLoading()
+            showError("서버 응답이 20초 동안 완료되지 않았습니다.")
+            startAutoDiscovery()
+        }
+        pageLoadTimeout = timeout
+        Handler(Looper.getMainLooper()).postDelayed(timeout, 20_000L)
+    }
+
+    private fun showError(reason: String) {
+        cancelPageLoadTimeout()
         errorView.visibility = View.VISIBLE
         val isConsent = currentScreenPath.substringBefore('?') == SCREEN_PATH_CONSENT
         val retrySeconds = 3
+        val detail = "서버: ${config.baseUrl.trimEnd('/')}\n화면: ${currentScreenPath.substringBefore('?')}\n원인: $reason"
         connectionStatusText?.text = if (isConsent) {
-            "서버에 연결할 수 없습니다\n동의서 작성은 계속할 수 있습니다. 저장 시 임시 보관됩니다."
+            "서버 화면을 불러오지 못했습니다\n$detail\n동의서 저장은 임시 보관됩니다."
         } else {
-            "서버에 연결할 수 없습니다\n${retrySeconds}초 후 자동으로 다시 시도합니다."
+            "서버 화면을 불러오지 못했습니다\n$detail\n${retrySeconds}초 후 다시 시도합니다."
         }
         if (isConsent) return
         connectionRetryRunnable?.let { Handler(Looper.getMainLooper()).removeCallbacks(it) }
         if (connectionRetryCount >= MAX_CONNECTION_RETRIES) {
-            connectionStatusText?.text = "서버 연결이 계속 실패합니다\n덴트웹 접수 화면으로 전환합니다."
+            connectionStatusText?.text = "서버 연결이 계속 실패합니다\n$detail\n덴트웹 접수 화면으로 전환합니다."
             launchDentWebAfterResume()
             connectionRetryCount = 0
             return
@@ -1597,25 +1634,28 @@ class MainActivity : Activity(), LifecycleOwner {
 
         override fun onPageFinished(view: WebView, url: String?) {
             super.onPageFinished(view, url)
-            if (view === webView) {
+            if (view === webView && url == lastLoadedUrl && !pageLoadFailed) {
+                cancelPageLoadTimeout()
                 connectionRetryCount = 0
                 connectionRetryRunnable?.let { Handler(Looper.getMainLooper()).removeCallbacks(it) }
                 connectionRetryRunnable = null
                 errorView.visibility = View.GONE
+                markBaseUrlVerifiedIfNeeded()
             }
-            markBaseUrlVerifiedIfNeeded()
         }
 
         override fun onReceivedError(view: WebView, request: WebResourceRequest, error: android.webkit.WebResourceError) {
-            if (request.isForMainFrame && view === webView) {
-                showError()
+            if (request.isForMainFrame && view === webView && request.url.toString() == lastLoadedUrl && !pageLoadFailed) {
+                pageLoadFailed = true
+                showError("네트워크 오류 ${error.errorCode}: ${error.description}")
                 startAutoDiscovery()
             }
         }
 
         override fun onReceivedHttpError(view: WebView, request: WebResourceRequest, errorResponse: android.webkit.WebResourceResponse) {
-            if (request.isForMainFrame && view === webView && errorResponse.statusCode >= 500) {
-                showError()
+            if (request.isForMainFrame && view === webView && request.url.toString() == lastLoadedUrl && errorResponse.statusCode >= 400 && !pageLoadFailed) {
+                pageLoadFailed = true
+                showError("HTTP ${errorResponse.statusCode} 응답")
                 startAutoDiscovery()
             }
         }
