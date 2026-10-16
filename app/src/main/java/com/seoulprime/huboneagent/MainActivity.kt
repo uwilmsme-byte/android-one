@@ -82,6 +82,8 @@ class MainActivity : Activity(), LifecycleOwner {
     private lateinit var webView: WebView
     private lateinit var errorView: LinearLayout
     private var lastLoadedUrl = ""
+    private var pageLoadAttemptId = 0
+    private var pageLoadStartedAtMs = 0L
     private var fileCallback: ValueCallback<Array<Uri>>? = null
     private var discoveryStarted = false
     private var connectionRetryRunnable: Runnable? = null
@@ -566,7 +568,10 @@ class MainActivity : Activity(), LifecycleOwner {
             return
         }
         lastLoadedUrl = target
-        CommandPollState.adStatusMessage = "[AD_TRACE] page_load_start path=${currentScreenPath.substringBefore('?')} attempt=$connectionRetryCount"
+        pageLoadAttemptId += 1
+        pageLoadStartedAtMs = android.os.SystemClock.elapsedRealtime()
+        val serverHost = Uri.parse(config.baseUrl).host ?: "unknown"
+        CommandPollState.adStatusMessage = "[AD_TRACE] page_load_start id=$pageLoadAttemptId host=$serverHost path=${currentScreenPath.substringBefore('?')} retry=$connectionRetryCount"
         pageLoadFailed = false
         showLoading()
         schedulePageLoadTimeout()
@@ -667,8 +672,9 @@ class MainActivity : Activity(), LifecycleOwner {
     private fun schedulePageLoadTimeout() {
         cancelPageLoadTimeout()
         val expectedUrl = lastLoadedUrl
+        val expectedAttemptId = pageLoadAttemptId
         val timeout = Runnable {
-            if (lastLoadedUrl != expectedUrl || pageLoadFailed) return@Runnable
+            if (lastLoadedUrl != expectedUrl || pageLoadAttemptId != expectedAttemptId || pageLoadFailed) return@Runnable
             pageLoadFailed = true
             webView.stopLoading()
             showError("서버 응답이 20초 동안 완료되지 않았습니다.")
@@ -685,8 +691,15 @@ class MainActivity : Activity(), LifecycleOwner {
         val isConsent = currentScreenPath.substringBefore('?') == SCREEN_PATH_CONSENT
         val retrySeconds = 3
         val pagePath = currentScreenPath.substringBefore('?')
-        val traceReason = reason.replace('\n', ' ').take(100)
-        CommandPollState.adStatusMessage = "[AD_TRACE] page_load_error path=$pagePath retry=$connectionRetryCount reason=$traceReason".take(240)
+        if (reason.startsWith("서버 응답이 20초")) {
+            val elapsedMs = if (pageLoadStartedAtMs > 0L) android.os.SystemClock.elapsedRealtime() - pageLoadStartedAtMs else -1L
+            val host = Uri.parse(config.baseUrl).host ?: "unknown"
+            val webPath = try { Uri.parse(webView.url.orEmpty()).path ?: "-" } catch (_: Exception) { "-" }
+            CommandPollState.adStatusMessage = "[AD_TRACE] page_timeout id=$pageLoadAttemptId host=$host path=$pagePath elapsed_ms=$elapsedMs progress=${webView.progress} web_path=$webPath retry=$connectionRetryCount".take(240)
+        } else {
+            val traceReason = reason.replace('\n', ' ').take(100)
+            CommandPollState.adStatusMessage = "[AD_TRACE] page_load_error path=$pagePath retry=$connectionRetryCount reason=$traceReason".take(240)
+        }
         val detail = "서버: ${config.baseUrl.trimEnd('/')}\n화면: $pagePath\n원인: $reason"
         connectionStatusText?.text = if (isConsent) {
             "서버 화면을 불러오지 못했습니다\n$detail\n동의서 저장은 임시 보관됩니다."
@@ -1682,7 +1695,8 @@ class MainActivity : Activity(), LifecycleOwner {
                 connectionRetryRunnable?.let { Handler(Looper.getMainLooper()).removeCallbacks(it) }
                 connectionRetryRunnable = null
                 errorView.visibility = View.GONE
-                CommandPollState.adStatusMessage = "[AD_TRACE] page_load_ok path=${currentScreenPath.substringBefore('?')}"
+                val elapsedMs = if (pageLoadStartedAtMs > 0L) android.os.SystemClock.elapsedRealtime() - pageLoadStartedAtMs else -1L
+                CommandPollState.adStatusMessage = "[AD_TRACE] page_load_ok id=$pageLoadAttemptId path=${currentScreenPath.substringBefore('?')} elapsed_ms=$elapsedMs progress=${view.progress}"
                 markBaseUrlVerifiedIfNeeded()
             }
         }
