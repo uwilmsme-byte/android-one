@@ -66,9 +66,19 @@ class AdOverlayManager(private val context: Context) {
     // 때는 JS 쪽(tablet_idle_overlay.js)이 이미 처리하므로 이 매니저는 손을 뗀다
     // (동시에 두 오버레이가 뜨는 걸 방지).
     private var armed = false
+    private var buildTraceReported = false
+
+    private fun traceAd(message: String) {
+        val trace = "[AD_TRACE] $message".take(240)
+        CommandPollState.adStatusMessage = trace
+    }
 
     /** CommandPollService가 매 폴링(3초)마다 호출한다. */
     fun onPollTick(screenId: String, baseUrl: String, externalDentweb: Boolean) {
+        if (!buildTraceReported) {
+            buildTraceReported = true
+            traceAd("client_build=${BuildConfig.VERSION_NAME}")
+        }
         configScreenId = screenId
         configBaseUrl = baseUrl
         ensureTouchWatcher()
@@ -79,6 +89,7 @@ class AdOverlayManager(private val context: Context) {
                 resetIdleTimer()
             }
         } else {
+            if (armed || adOverlayView != null) traceAd("stop external_dentweb=false")
             armed = false
             cancelIdleTimer()
             hideAdOverlay()
@@ -91,6 +102,7 @@ class AdOverlayManager(private val context: Context) {
     // 다음 폴링에서 externalDentweb=true가 계속 확인되면 onPollTick()이 20초 카운트를
     // 처음부터 다시 시작한다(teardown()과 달리 터치 watcher는 그대로 유지).
     fun pauseIdleTimerForSleep() {
+        traceAd("stop sleep_command")
         android.util.Log.d("HubOneSleep", "AdOverlayManager.pauseIdleTimerForSleep()")
         armed = false
         cancelIdleTimer()
@@ -179,6 +191,7 @@ class AdOverlayManager(private val context: Context) {
                 slideUrls = cfg.slideUrls
                 slideIntervalMs = cfg.slideIntervalMs
                 slideIndex = 0
+                traceAd("overlay_start slides=${slideUrls.size} interval_ms=$slideIntervalMs")
                 displayAdOverlayWindow()
                 renderCurrentSlide()
                 scheduleNextSlide()
@@ -211,9 +224,11 @@ class AdOverlayManager(private val context: Context) {
                     // 어디를 눌러도 그냥 광고만 걷고 원래 떠 있던 화면(덴트웹)에 남는다 —
                     // 이 오버레이는 덴트웹이 전면일 때만 뜨므로 "직전 화면"은 항상 덴트웹.
                     if (!touchSplitEnabled) {
+                        traceAd("dismiss_touch split=false")
                         dismissAdStayOnDentweb()
                     } else {
                         val isRightHalf = event.x >= v.width / 2f
+                        traceAd("dismiss_touch half=${if (isRightHalf) "right" else "left"}")
                         if (isRightHalf) dismissAdAndGoToContact() else dismissAdStayOnDentweb()
                     }
                 }
@@ -221,8 +236,8 @@ class AdOverlayManager(private val context: Context) {
             }
             wm.addView(iv, params)
             adOverlayView = iv
-        } catch (_: Exception) {
-            // 다음 idle 주기에 재시도된다.
+        } catch (e: Exception) {
+            traceAd("overlay_create_failed type=${e.javaClass.simpleName}")
         }
     }
 
@@ -234,23 +249,29 @@ class AdOverlayManager(private val context: Context) {
     private fun renderCurrentSlide() {
         val iv = adOverlayView ?: return
         if (slideUrls.isEmpty()) return
-        val url = slideUrls[slideIndex % slideUrls.size]
+        val index = slideIndex % slideUrls.size
+        val url = slideUrls[index]
+        traceAd("slide_request index=${index + 1}/${slideUrls.size}")
         Thread {
+            val startedAt = System.currentTimeMillis()
             val bmp = try {
                 val conn = (URL(url).openConnection() as HttpURLConnection).apply {
                     connectTimeout = 5_000
                     readTimeout = 15_000
                 }
                 conn.inputStream.use { BitmapFactory.decodeStream(it) }
-            } catch (_: Exception) {
+            } catch (e: Exception) {
+                traceAd("slide_error index=${index + 1} type=${e.javaClass.simpleName}")
                 null
             }
             handler.post {
                 if (adOverlayView === iv) {
                     if (bmp != null) {
                         iv.setImageBitmap(bmp)
+                        traceAd("slide_shown index=${index + 1}/${slideUrls.size} elapsed_ms=${System.currentTimeMillis() - startedAt}")
                     } else {
                         // 이미지까지 내려받지 못한 검은 화면을 계속 덮어두지 않는다.
+                        traceAd("slide_decode_failed index=${index + 1}; overlay_hidden")
                         hideAdOverlay()
                         if (armed) resetIdleTimer()
                     }
@@ -264,6 +285,7 @@ class AdOverlayManager(private val context: Context) {
         val r = Runnable {
             if (adOverlayView == null) return@Runnable
             slideIndex = (slideIndex + 1) % maxOf(1, slideUrls.size)
+            traceAd("slide_advance index=${slideIndex + 1}/${slideUrls.size}")
             renderCurrentSlide()
             scheduleNextSlide()
         }
@@ -282,6 +304,7 @@ class AdOverlayManager(private val context: Context) {
     // 광고를 걷고 웹뷰(/pt 접수 화면)를 앞으로 가져온다 — CommandPollService의
     // "open_contact" 명령 처리(bringMainActivityToFront)와 같은 방식.
     private fun dismissAdAndGoToContact() {
+        traceAd("dismiss_to_contact")
         hideAdOverlay()
         armed = false
         cancelIdleTimer()
@@ -291,6 +314,7 @@ class AdOverlayManager(private val context: Context) {
     // 광고 왼쪽 터치 — 이미 덴트웹이 광고 뒤에 그대로 떠 있으므로 걷어내기만 하면
     // 된다(전환 불필요). 무조작 상태가 계속되면 다시 idle 카운트를 새로 건다.
     private fun dismissAdStayOnDentweb() {
+        traceAd("dismiss_stay_dentweb")
         hideAdOverlay()
         if (armed) resetIdleTimer()
     }

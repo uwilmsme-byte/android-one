@@ -179,8 +179,11 @@ class CommandPollService : Service() {
         adOverlayManager.onPollTick(screen, base, externalDentweb)
         val currentScreen = CommandPollState.currentScreen
         val focused = !externalDentweb && CommandPollState.windowFocused
-        val statusMessage = if (detected == null) "전면 앱 확인 권한이 없어 덴트웹 앱 상태를 추정치로만 보고합니다."
-            else CommandPollState.lastStatusMessage
+        val statusMessage = listOf(
+            CommandPollState.adStatusMessage,
+            if (detected == null) "전면 앱 확인 권한이 없어 덴트웹 앱 상태를 추정치로만 보고합니다."
+            else CommandPollState.lastStatusMessage,
+        ).filter { it.isNotBlank() }.joinToString(" / ").take(300)
         // 절전(sleep)/깨우기(wake) 명령이 실제로 먹혔는지 데스크 탭에서 확인할 수 있게
         // — 실제 요청 사항: "절전 상태인지 깨있는 상태인지 감지는 안되나?".
         val screenOn = getSystemService(PowerManager::class.java)?.isInteractive ?: true

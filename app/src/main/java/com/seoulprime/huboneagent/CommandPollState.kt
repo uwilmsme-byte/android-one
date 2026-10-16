@@ -29,4 +29,8 @@ object CommandPollState {
     // 보고해 허브원 보드 탭에 바로 보이게 한다(예: "덴트웹 앱을 찾을 수 없습니다: ...").
     @Volatile
     var lastStatusMessage: String = ""
+
+    // 광고 오버레이의 마지막 단계 로그를 서버 heartbeat로 전달한다.
+    @Volatile
+    var adStatusMessage: String = ""
 }
