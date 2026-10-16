@@ -31,6 +31,8 @@ import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewOutlineProvider
+import android.view.WindowInsets
+import android.view.WindowInsetsController
 import android.view.WindowManager
 import android.webkit.CookieManager
 import android.webkit.JavascriptInterface
@@ -764,13 +766,23 @@ class MainActivity : Activity(), LifecycleOwner {
     }
 
     private fun showSystemNavigation() {
-        // 홈 위젯으로 곧바로 이동할 수 있도록 Android 하단 내비게이션은 항상 보인다.
-        // 상담 웹 화면의 세로 공간을 최대한 유지하기 위해 상단 상태바만 숨긴다.
-        window.decorView.systemUiVisibility = (
-            View.SYSTEM_UI_FLAG_FULLSCREEN or
-                View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or
-                View.SYSTEM_UI_FLAG_LAYOUT_STABLE
-        )
+        // 홈 위젯으로 돌아갈 수 있도록 하단 내비게이션은 유지하고 상태바만 숨긴다.
+        // Android 11+에서 이전 systemUiVisibility 플래그는 상단 스와이프 등으로
+        // 풀릴 수 있어 WindowInsetsController로 상태바만 다시 숨긴다.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            window.insetsController?.apply {
+                systemBarsBehavior = WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+                hide(WindowInsets.Type.statusBars())
+            }
+        } else {
+            @Suppress("DEPRECATION")
+            window.decorView.systemUiVisibility = (
+                View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY or
+                    View.SYSTEM_UI_FLAG_FULLSCREEN or
+                    View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or
+                    View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+            )
+        }
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
