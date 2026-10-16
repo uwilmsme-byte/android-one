@@ -3,7 +3,6 @@ package com.seoulprime.huboneagent
 import android.Manifest
 import android.annotation.SuppressLint
 import android.app.Activity
-import android.app.AppOpsManager
 import android.app.Dialog
 import android.app.KeyguardManager
 import android.content.Intent
@@ -24,8 +23,6 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
-import android.os.Process
-import android.provider.Settings
 import android.util.Base64
 import android.view.Gravity
 import android.view.MotionEvent
@@ -253,9 +250,6 @@ class MainActivity : Activity(), LifecycleOwner {
             FrameLayout.LayoutParams(260, 260, Gravity.TOP or Gravity.END).apply { topMargin = 160 }
         )
         setContentView(root)
-        if (needsPermissionSetup()) {
-            startActivity(Intent(this, SettingsActivity::class.java))
-        }
         if (intent?.getBooleanExtra(EXTRA_SCREEN_POPUP, false) == true) {
             applyRequestedOrientation(intent.getStringExtra(EXTRA_SCREEN_ORIENTATION))
             loadConfiguredPage()
@@ -744,19 +738,6 @@ class MainActivity : Activity(), LifecycleOwner {
     }
 
     private fun openAdmin() { startActivity(Intent(this, SettingsActivity::class.java)) }
-
-    private fun needsPermissionSetup(): Boolean {
-        val cameraMissing = checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED
-        val audioMissing = checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED
-        val usageMissing = !hasUsageAccess()
-        val overlayMissing = android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M && !Settings.canDrawOverlays(this)
-        return cameraMissing || audioMissing || usageMissing || overlayMissing
-    }
-
-    private fun hasUsageAccess(): Boolean {
-        val appOps = getSystemService(AppOpsManager::class.java)
-        return appOps?.checkOpNoThrow(AppOpsManager.OPSTR_GET_USAGE_STATS, Process.myUid(), packageName) == AppOpsManager.MODE_ALLOWED
-    }
 
     private fun applyScreenPolicy() {
         if (config.keepScreenOn) window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
