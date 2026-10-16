@@ -73,6 +73,7 @@
             android:screenOrientation="landscape" />
         <activity
             android:name=".MainActivity"
+            android:theme="@android:style/Theme.Material.Light.NoActionBar"
             android:launchMode="singleTask"
             android:exported="true">
             <intent-filter>
