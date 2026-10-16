@@ -66,8 +66,11 @@ class CommandPollService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        AgentLog.info("CommandPollService", "onCreate_begin")
         adOverlayManager = AdOverlayManager(this)
+        AgentLog.info("CommandPollService", "starting_foreground")
         startForeground(NOTIFICATION_ID, buildNotification())
+        AgentLog.info("CommandPollService", "foreground_started")
         ensureOverlayKeepAlive()
         startPolling()
     }

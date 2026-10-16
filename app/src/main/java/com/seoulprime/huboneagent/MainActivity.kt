@@ -147,11 +147,13 @@ class MainActivity : Activity(), LifecycleOwner {
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        AgentLog.info("MainActivity", "onCreate_begin")
         activeInstance = this
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_CREATE)
         requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
         showSystemNavigation()
         config = AgentConfig.load(this)
+        AgentLog.info("MainActivity", "config_loaded")
         applyScreenPolicy()
         // "wake"/open_contact/open_reservation 명령으로 불려나온 경우에만 화면을 깨운다
         // — 실제 겪은 문제: 이 플래그를 계속 켜둔 채로 두면(이전 구현) MainActivity 창이
@@ -167,6 +169,7 @@ class MainActivity : Activity(), LifecycleOwner {
             launchDentWebAfterResume()
         }
 
+        AgentLog.info("MainActivity", "webview_create_begin")
         webView = WebView(this).apply {
             settings.javaScriptEnabled = true
             settings.domStorageEnabled = true
@@ -236,6 +239,7 @@ class MainActivity : Activity(), LifecycleOwner {
                 }
             }
         }
+        AgentLog.info("MainActivity", "webview_create_complete")
         errorView = buildErrorView()
         val root = FrameLayout(this).apply { setBackgroundColor(Color.WHITE) }
         root.addView(webView, FrameLayout.LayoutParams(-1, -1))
@@ -250,6 +254,7 @@ class MainActivity : Activity(), LifecycleOwner {
             FrameLayout.LayoutParams(260, 260, Gravity.TOP or Gravity.END).apply { topMargin = 160 }
         )
         setContentView(root)
+        AgentLog.info("MainActivity", "content_view_attached")
         if (intent?.getBooleanExtra(EXTRA_SCREEN_POPUP, false) == true) {
             applyRequestedOrientation(intent.getStringExtra(EXTRA_SCREEN_ORIENTATION))
             loadConfiguredPage()
@@ -262,7 +267,9 @@ class MainActivity : Activity(), LifecycleOwner {
         // (실제 요청 사항: "접수, 혹은 예약 화면을 열면 덴트웹 접수 화면에서 /pt,
         // /pt/reservation으로 화면이 전환되도록" — 예전엔 이 Activity가 백그라운드로
         // 밀리면(=덴트웹이 앞에 있으면) 폴링 자체가 멈춰서 명령을 받을 수 없었다).
+        AgentLog.info("MainActivity", "command_service_start_requested")
         CommandPollService.start(this)
+        AgentLog.info("MainActivity", "onCreate_complete")
     }
 
     // CommandPollService가 명령을 받아 이 Activity를 강제로 앞에 가져올 때(덴트웹 화면

@@ -52,12 +52,22 @@
     </queries>
 
     <application
+        android:name=".HubOneAgentApplication"
         android:allowBackup="false"
         android:label="HUBONE Agent"
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
         android:usesCleartextTraffic="true">
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/agent_log_paths" />
+        </provider>
         <activity
             android:name=".SettingsActivity"
             android:screenOrientation="landscape" />

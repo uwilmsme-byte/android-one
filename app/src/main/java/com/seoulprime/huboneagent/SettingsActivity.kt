@@ -17,6 +17,7 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
+import androidx.core.content.FileProvider
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import java.net.HttpURLConnection
@@ -35,6 +36,7 @@ class SettingsActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        AgentLog.info("SettingsActivity", "onCreate")
         requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
         val config = AgentConfig.load(this)
         val root = LinearLayout(this).apply {
@@ -210,9 +212,12 @@ class SettingsActivity : Activity() {
         addButton(row2, "기본값 복원") { restoreDefaults() }
         addButton(row2, "저장") { save(); finish() }
         buttonsGrid.addView(row2, rowLayoutParams())
+        val row3 = buttonRow()
+        addButton(row3, "로그 보기") { openLogs() }
+        buttonsGrid.addView(row3, rowLayoutParams())
         root.addView(buttonsGrid, rowLayoutParams())
         // 오늘 하루에도 버튼/설명이 계속 늘어서(카메라·마이크·전면앱확인·화면위표시·절전명령
-        // 5개 권한 버튼 + 6개 동작 버튼) 세로 길이가 화면을 넘어설 수 있다 — ScrollView로
+        // 5개 권한 버튼 + 7개 동작 버튼) 세로 길이가 화면을 넘어설 수 있다 — ScrollView로
         // 감싸서 아래쪽 버튼이 화면 밖으로 잘리지 않게 방어적으로 처리한다.
         val content = ScrollView(this).apply { addView(root) }
         setContentView(content)
@@ -321,6 +326,38 @@ class SettingsActivity : Activity() {
         baseUrl.setText(AgentConfig.DEFAULT_BASE_URL)
         screenId.setText(AgentConfig.DEFAULT_SCREEN_ID)
         dentwebPackage.setText(AgentConfig.DEFAULT_DENTWEB_PACKAGE)
+    }
+
+    private fun openLogs() {
+        AgentLog.info("SettingsActivity", "logs_open_requested")
+        val file = try {
+            AgentLog.logFile(this)
+        } catch (error: Exception) {
+            AgentLog.warning("SettingsActivity", "log_file_unavailable", error)
+            Toast.makeText(this, "로그 파일을 만들 수 없습니다.", Toast.LENGTH_LONG).show()
+            return
+        }
+        val uri = FileProvider.getUriForFile(this, "$packageName.fileprovider", file)
+        val viewIntent = Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(uri, "text/plain")
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        try {
+            startActivity(Intent.createChooser(viewIntent, "로그 열기"))
+        } catch (viewError: Exception) {
+            AgentLog.warning("SettingsActivity", "no_text_viewer_for_log", viewError)
+            val sendIntent = Intent(Intent.ACTION_SEND).apply {
+                type = "text/plain"
+                putExtra(Intent.EXTRA_STREAM, uri)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            try {
+                startActivity(Intent.createChooser(sendIntent, "로그 열기 또는 공유"))
+            } catch (sendError: Exception) {
+                AgentLog.warning("SettingsActivity", "log_share_unavailable", sendError)
+                Toast.makeText(this, "로그를 열거나 공유할 앱을 찾지 못했습니다.", Toast.LENGTH_LONG).show()
+            }
+        }
     }
 
     private fun openMain() {
