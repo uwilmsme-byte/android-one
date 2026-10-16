@@ -67,10 +67,22 @@ class AdOverlayManager(private val context: Context) {
     // (동시에 두 오버레이가 뜨는 걸 방지).
     private var armed = false
     private var buildTraceReported = false
+    private var pendingDecodeFailure = ""
+    private var pendingDecodeFailureUntilMs = 0L
 
     private fun traceAd(message: String) {
-        val trace = "[AD_TRACE] $message".take(240)
-        CommandPollState.adStatusMessage = trace
+        val now = System.currentTimeMillis()
+        if (message.contains("slide_decode_failed")) {
+            pendingDecodeFailure = message
+            pendingDecodeFailureUntilMs = now + 30_000L
+        }
+        if (pendingDecodeFailure.isNotEmpty() && now < pendingDecodeFailureUntilMs) {
+            CommandPollState.adStatusMessage = "[AD_TRACE] $pendingDecodeFailure".take(240)
+            return
+        }
+        pendingDecodeFailure = ""
+        pendingDecodeFailureUntilMs = 0L
+        CommandPollState.adStatusMessage = "[AD_TRACE] $message".take(240)
     }
 
     /** CommandPollService가 매 폴링(3초)마다 호출한다. */
@@ -252,29 +264,48 @@ class AdOverlayManager(private val context: Context) {
         if (slideUrls.isEmpty()) return
         val index = slideIndex % slideUrls.size
         val url = slideUrls[index]
-        traceAd("slide_request index=${index + 1}/${slideUrls.size}")
+        val fileId = Regex("/tablet-ad/([^/]+)/preview").find(runCatching { URL(url).path }.getOrDefault(""))
+            ?.groupValues?.getOrNull(1) ?: "unknown"
+        traceAd("slide_request index=${index + 1}/${slideUrls.size} file_id=$fileId")
         Thread {
             val startedAt = System.currentTimeMillis()
+            var failureDetail = ""
+            var decodeStarted = false
             val bmp = try {
                 val conn = (URL(url).openConnection() as HttpURLConnection).apply {
                     connectTimeout = 5_000
                     readTimeout = 15_000
                 }
-                conn.inputStream.use { BitmapFactory.decodeStream(it) }
+                try {
+                    val responseCode = conn.responseCode
+                    val contentType = conn.contentType ?: "unknown"
+                    val contentLength = conn.contentLengthLong
+                    if (responseCode !in 200..299) {
+                        throw java.io.IOException("http_$responseCode type=$contentType bytes=$contentLength")
+                    }
+                    conn.inputStream.use { input ->
+                        decodeStarted = true
+                        BitmapFactory.decodeStream(input)
+                            ?: throw java.io.IOException("bitmap_null http=$responseCode type=$contentType bytes=$contentLength")
+                    }
+                } finally {
+                    conn.disconnect()
+                }
             } catch (e: Exception) {
-                traceAd("slide_error index=${index + 1} type=${e.javaClass.simpleName}")
+                val failureEvent = if (decodeStarted) "slide_decode_failed" else "slide_load_failed"
+                failureDetail = "file_id=$fileId type=${e.javaClass.simpleName} reason=${(e.message ?: "-").replace(Regex("\\s+"), "_").take(100)}"
+                android.util.Log.w("HubOneAd", "$failureEvent index=${index + 1}/${slideUrls.size} $failureDetail", e)
                 null
             }
             handler.post {
                 if (adOverlayView === iv) {
                     if (bmp != null) {
                         iv.setImageBitmap(bmp)
-                        traceAd("slide_shown index=${index + 1}/${slideUrls.size} elapsed_ms=${System.currentTimeMillis() - startedAt}")
+                        traceAd("slide_shown index=${index + 1}/${slideUrls.size} file_id=$fileId elapsed_ms=${System.currentTimeMillis() - startedAt}")
                     } else {
-                        // 이미지까지 내려받지 못한 검은 화면을 계속 덮어두지 않는다.
-                        traceAd("slide_decode_failed index=${index + 1}; overlay_hidden")
-                        hideAdOverlay()
-                        if (armed) resetIdleTimer()
+                        // 실패한 한 장만 건너뛴다. 기존 화면과 순환 타이머를 유지해 광고 재생을 중단하지 않는다.
+                        val failureEvent = if (decodeStarted) "slide_decode_failed" else "slide_load_failed"
+                        traceAd("$failureEvent index=${index + 1}/${slideUrls.size} $failureDetail; continuing")
                     }
                 }
             }
