@@ -172,7 +172,12 @@ class MainActivity : Activity(), LifecycleOwner {
             settings.domStorageEnabled = true
             settings.allowFileAccess = true
             settings.allowContentAccess = true
-            settings.mediaPlaybackRequiresUserGesture = true
+            // TTS(통역 음성)는 페이지 쪽 스피커 토글(ttsOn)이 켜져 있을 때만 코드가
+            // 자동 재생을 시도한다 — 이미 그 자체가 재생 여부를 통제하는 게이트라,
+            // WebView 기본값인 "사용자 제스처 없이는 재생 금지"는 여기서 보호 효과 없이
+            // 번역 음성을 조용히 막기만 했다(실사용 지적: 스피커를 켜도 태블릿에서
+            // TTS가 안 됨).
+            settings.mediaPlaybackRequiresUserGesture = false
             CookieManager.getInstance().setAcceptCookie(true)
             CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
             addJavascriptInterface(AudioBridge(), "HubOneAudio")
@@ -575,7 +580,9 @@ class MainActivity : Activity(), LifecycleOwner {
             settings.domStorageEnabled = true
             settings.allowFileAccess = true
             settings.allowContentAccess = true
-            settings.mediaPlaybackRequiresUserGesture = true
+            // 위 메인 webView와 동일한 이유로 자동재생 제한을 끈다 — TTS 재생 여부는
+            // 이미 페이지 쪽 스피커 토글이 게이트한다.
+            settings.mediaPlaybackRequiresUserGesture = false
             CookieManager.getInstance().setAcceptCookie(true)
             CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
             addJavascriptInterface(AudioBridge(), "HubOneAudio")
