@@ -77,7 +77,8 @@ class AdOverlayManager(private val context: Context) {
     fun onPollTick(screenId: String, baseUrl: String, externalDentweb: Boolean) {
         if (!buildTraceReported) {
             buildTraceReported = true
-            traceAd("client_build=${BuildConfig.VERSION_NAME}")
+            val appVersion = context.packageManager.getPackageInfo(context.packageName, 0).versionName ?: "unknown"
+            traceAd("client_build=$appVersion")
         }
         configScreenId = screenId
         configBaseUrl = baseUrl
