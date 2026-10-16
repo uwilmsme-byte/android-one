@@ -566,6 +566,7 @@ class MainActivity : Activity(), LifecycleOwner {
             return
         }
         lastLoadedUrl = target
+        CommandPollState.adStatusMessage = "[AD_TRACE] page_load_start path=${currentScreenPath.substringBefore('?')} attempt=$connectionRetryCount"
         pageLoadFailed = false
         showLoading()
         schedulePageLoadTimeout()
@@ -683,7 +684,10 @@ class MainActivity : Activity(), LifecycleOwner {
         errorView.visibility = View.VISIBLE
         val isConsent = currentScreenPath.substringBefore('?') == SCREEN_PATH_CONSENT
         val retrySeconds = 3
-        val detail = "서버: ${config.baseUrl.trimEnd('/')}\n화면: ${currentScreenPath.substringBefore('?')}\n원인: $reason"
+        val pagePath = currentScreenPath.substringBefore('?')
+        val traceReason = reason.replace('\n', ' ').take(100)
+        CommandPollState.adStatusMessage = "[AD_TRACE] page_load_error path=$pagePath retry=$connectionRetryCount reason=$traceReason".take(240)
+        val detail = "서버: ${config.baseUrl.trimEnd('/')}\n화면: $pagePath\n원인: $reason"
         connectionStatusText?.text = if (isConsent) {
             "서버 화면을 불러오지 못했습니다\n$detail\n동의서 저장은 임시 보관됩니다."
         } else {
@@ -692,6 +696,7 @@ class MainActivity : Activity(), LifecycleOwner {
         if (isConsent) return
         connectionRetryRunnable?.let { Handler(Looper.getMainLooper()).removeCallbacks(it) }
         if (connectionRetryCount >= MAX_CONNECTION_RETRIES) {
+            CommandPollState.adStatusMessage = "[AD_TRACE] fallback_to_dentweb path=$pagePath retry=$connectionRetryCount".take(240)
             connectionStatusText?.text = "서버 연결이 계속 실패합니다\n$detail\n덴트웹 접수 화면으로 전환합니다."
             launchDentWebAfterResume()
             connectionRetryCount = 0
@@ -1677,6 +1682,7 @@ class MainActivity : Activity(), LifecycleOwner {
                 connectionRetryRunnable?.let { Handler(Looper.getMainLooper()).removeCallbacks(it) }
                 connectionRetryRunnable = null
                 errorView.visibility = View.GONE
+                CommandPollState.adStatusMessage = "[AD_TRACE] page_load_ok path=${currentScreenPath.substringBefore('?')}"
                 markBaseUrlVerifiedIfNeeded()
             }
         }
