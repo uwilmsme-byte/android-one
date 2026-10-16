@@ -57,7 +57,7 @@ class AdOverlayManager(private val context: Context) {
     // 값으로 다음 주기부터 갱신한다(웹 버전 tablet_idle_overlay.js와 동일한 절충).
     private var cachedIdleMs: Long = IDLE_MS
     // 광고 좌/우 분리 터치 — 데스크 "Kiosk 설정"에서 켜고 끌 수 있음(ad_touch_split).
-    // 끄면 어디를 눌러도 dismissAdAndGoToContact(reason)만 실행(예전 동작).
+    // 끄면 어디를 눌러도 dismissAdAndGoToContact()만 실행(예전 동작).
     private var touchSplitEnabled: Boolean = true
 
     private var configScreenId: String = ""
@@ -66,16 +66,11 @@ class AdOverlayManager(private val context: Context) {
     // 때는 JS 쪽(tablet_idle_overlay.js)이 이미 처리하므로 이 매니저는 손을 뗀다
     // (동시에 두 오버레이가 뜨는 걸 방지).
     private var armed = false
-    private var lastExternalDentweb: Boolean? = null
 
     /** CommandPollService가 매 폴링(3초)마다 호출한다. */
     fun onPollTick(screenId: String, baseUrl: String, externalDentweb: Boolean) {
         configScreenId = screenId
         configBaseUrl = baseUrl
-        if (lastExternalDentweb != externalDentweb) {
-            AgentLog.info("AdOverlay", "foreground_changed screen=$screenId external_dentweb=$externalDentweb armed=$armed overlay=${adOverlayView != null}")
-            lastExternalDentweb = externalDentweb
-        }
         ensureTouchWatcher()
         if (externalDentweb) {
             if (!armed) {
@@ -86,7 +81,7 @@ class AdOverlayManager(private val context: Context) {
         } else {
             armed = false
             cancelIdleTimer()
-            hideAdOverlay("foreground_not_dentweb")
+            hideAdOverlay()
         }
     }
 
@@ -99,13 +94,13 @@ class AdOverlayManager(private val context: Context) {
         android.util.Log.d("HubOneSleep", "AdOverlayManager.pauseIdleTimerForSleep()")
         armed = false
         cancelIdleTimer()
-        hideAdOverlay("sleep_command")
+        hideAdOverlay()
     }
 
     fun teardown() {
         armed = false
         cancelIdleTimer()
-        hideAdOverlay("service_teardown")
+        hideAdOverlay()
         val v = touchWatcherView ?: return
         touchWatcherView = null
         try { windowManager?.removeView(v) } catch (_: Exception) { /* 무시 */ }
@@ -134,7 +129,7 @@ class AdOverlayManager(private val context: Context) {
                         // (전체화면을 덮고 있어 더 위에 뜸), 기기/OEM에 따라 바깥터치
                         // 감시 창이 대신 받는 경우를 대비한 동일 동작 백업 — 분리 터치가
                         // 꺼져 있으면 이쪽도 똑같이 직전 화면(덴트웹)에 남는다.
-                        if (touchSplitEnabled) dismissAdAndGoToContact("outside_touch_right") else dismissAdStayOnDentweb("outside_touch")
+                        if (touchSplitEnabled) dismissAdAndGoToContact() else dismissAdStayOnDentweb()
                     } else if (armed) {
                         resetIdleTimer()
                     }
@@ -178,7 +173,6 @@ class AdOverlayManager(private val context: Context) {
                 cachedIdleMs = cfg.idleMs // 다음 idle 대기부터 갱신된 값을 쓴다.
                 touchSplitEnabled = cfg.touchSplit
                 if (!cfg.enabled || cfg.slideUrls.isEmpty()) {
-                    AgentLog.info("AdOverlay", "not_shown screen=$screen enabled=${cfg.enabled} slide_count=${cfg.slideUrls.size}")
                     resetIdleTimer()
                     return@post
                 }
@@ -186,11 +180,8 @@ class AdOverlayManager(private val context: Context) {
                 slideIntervalMs = cfg.slideIntervalMs
                 slideIndex = 0
                 displayAdOverlayWindow()
-                if (adOverlayView != null) {
-                    AgentLog.info("AdOverlay", "shown screen=$screen slide_count=${slideUrls.size} idle_ms=$cachedIdleMs interval_ms=$slideIntervalMs touch_split=$touchSplitEnabled")
-                    renderCurrentSlide()
-                    scheduleNextSlide()
-                }
+                renderCurrentSlide()
+                scheduleNextSlide()
             }
         }.start()
     }
@@ -220,49 +211,39 @@ class AdOverlayManager(private val context: Context) {
                     // 어디를 눌러도 그냥 광고만 걷고 원래 떠 있던 화면(덴트웹)에 남는다 —
                     // 이 오버레이는 덴트웹이 전면일 때만 뜨므로 "직전 화면"은 항상 덴트웹.
                     if (!touchSplitEnabled) {
-                        dismissAdStayOnDentweb("touch_split_disabled")
+                        dismissAdStayOnDentweb()
                     } else {
                         val isRightHalf = event.x >= v.width / 2f
-                        if (isRightHalf) dismissAdAndGoToContact("touch_right") else dismissAdStayOnDentweb("touch_left")
+                        if (isRightHalf) dismissAdAndGoToContact() else dismissAdStayOnDentweb()
                     }
                 }
                 true
             }
             wm.addView(iv, params)
             adOverlayView = iv
-        } catch (e: Exception) {
-            AgentLog.warning("AdOverlay", "window_add_failed screen=$configScreenId", e)
+        } catch (_: Exception) {
+            // 다음 idle 주기에 재시도된다.
         }
     }
 
     // ⚠️ 아직 사진만 지원한다 — tablet_idle_overlay.js(웹 버전)는 사진/동영상을
-    // 섞어서 보여줄 수 있지만, 여기서는 BitmapFactory로 정지 이미지만 그린다.
-    // 다운로드나 디코딩이 실패하면 진단 로그를 남기고 광고 오버레이를 내린다.
+    // 섞어서 보여줄 수 있게 됐지만(kinds 필드), 여기(덴트웹 화면 위 오버레이)는
+    // BitmapFactory로 정지 이미지만 그린다. 목록에 동영상 file_id가 섞여 있으면
+    // 그 슬라이드는 디코딩이 실패해 조용히 건너뛴다(크래시는 안 남) — 네이티브
+    // 동영상 재생(MediaPlayer/VideoView)은 아직 구현하지 않음, 필요시 추가 작업.
     private fun renderCurrentSlide() {
         val iv = adOverlayView ?: return
         if (slideUrls.isEmpty()) return
-        val index = slideIndex
-        val screen = configScreenId
-        val url = slideUrls[index % slideUrls.size]
+        val url = slideUrls[slideIndex % slideUrls.size]
         Thread {
-            var responseCode = -1
-            var contentType = ""
-            var failure: Exception? = null
             val bmp = try {
                 val conn = (URL(url).openConnection() as HttpURLConnection).apply {
                     connectTimeout = 5_000
                     readTimeout = 15_000
                 }
-                responseCode = conn.responseCode
-                contentType = conn.contentType.orEmpty()
-                if (responseCode !in 200..299) throw java.io.IOException("http_$responseCode")
                 conn.inputStream.use { BitmapFactory.decodeStream(it) }
-            } catch (e: Exception) {
-                failure = e
+            } catch (_: Exception) {
                 null
-            }
-            if (bmp == null) {
-                AgentLog.warning("AdOverlay", "slide_load_failed screen=$screen index=$index http=$responseCode content_type=$contentType", failure)
             }
             handler.post {
                 if (adOverlayView === iv) {
@@ -270,7 +251,7 @@ class AdOverlayManager(private val context: Context) {
                         iv.setImageBitmap(bmp)
                     } else {
                         // 이미지까지 내려받지 못한 검은 화면을 계속 덮어두지 않는다.
-                        hideAdOverlay("slide_load_failed index=$index http=$responseCode")
+                        hideAdOverlay()
                         if (armed) resetIdleTimer()
                     }
                 }
@@ -290,19 +271,18 @@ class AdOverlayManager(private val context: Context) {
         handler.postDelayed(r, slideIntervalMs)
     }
 
-    private fun hideAdOverlay(reason: String) {
+    private fun hideAdOverlay() {
         slideCycleRunnable?.let { handler.removeCallbacks(it) }
         slideCycleRunnable = null
         val iv = adOverlayView ?: return
-        AgentLog.warning("AdOverlay", "hidden screen=$configScreenId reason=$reason armed=$armed")
         adOverlayView = null
         try { windowManager?.removeView(iv) } catch (_: Exception) { /* 무시 */ }
     }
 
     // 광고를 걷고 웹뷰(/pt 접수 화면)를 앞으로 가져온다 — CommandPollService의
     // "open_contact" 명령 처리(bringMainActivityToFront)와 같은 방식.
-    private fun dismissAdAndGoToContact(reason: String) {
-        hideAdOverlay(reason)
+    private fun dismissAdAndGoToContact() {
+        hideAdOverlay()
         armed = false
         cancelIdleTimer()
         navigateToContact()
@@ -310,8 +290,8 @@ class AdOverlayManager(private val context: Context) {
 
     // 광고 왼쪽 터치 — 이미 덴트웹이 광고 뒤에 그대로 떠 있으므로 걷어내기만 하면
     // 된다(전환 불필요). 무조작 상태가 계속되면 다시 idle 카운트를 새로 건다.
-    private fun dismissAdStayOnDentweb(reason: String) {
-        hideAdOverlay(reason)
+    private fun dismissAdStayOnDentweb() {
+        hideAdOverlay()
         if (armed) resetIdleTimer()
     }
 
@@ -352,9 +332,7 @@ class AdOverlayManager(private val context: Context) {
                 connectTimeout = 5_000
                 readTimeout = 10_000
             }
-            val responseCode = conn.responseCode
-            if (responseCode !in 200..299) {
-                AgentLog.warning("AdOverlay", "config_http_failed screen=$screenId http=$responseCode")
+            if (conn.responseCode !in 200..299) {
                 conn.disconnect()
                 return null
             }
@@ -386,8 +364,7 @@ class AdOverlayManager(private val context: Context) {
 
             val urls = ordered.map { "$base/api/files/tablet-ad/${Uri.encode(it)}/preview" }
             Config(enabled, urls, slideIntervalMs.coerceIn(1_000L, 60_000L), idleMs.coerceIn(3_000L, 300_000L), touchSplit)
-        } catch (e: Exception) {
-            AgentLog.warning("AdOverlay", "config_fetch_failed screen=$screenId", e)
+        } catch (_: Exception) {
             null
         }
     }
